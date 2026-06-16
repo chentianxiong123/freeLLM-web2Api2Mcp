@@ -91,24 +91,8 @@ async def chat_completions(request: Request):
         # 工具结果回传，自动放行
         return await handle_chat(request)
     else:
-        # 正常流程：走网关审批（管理员在 /admin 放行后才发 DeepSeek）
-        req_id, event = gateway.enqueue(body)
-
-        try:
-            await asyncio.wait_for(event.wait(), timeout=600)
-        except asyncio.TimeoutError:
-            gateway.reject(req_id)
-            return JSONResponse(status_code=408, content={
-                "error": {"message": "请求超时，管理员未审批", "type": "timeout_error"},
-            })
-
-        item = gateway._pending.get(req_id)
-        if item and item["status"] == "rejected":
-            return JSONResponse(status_code=400, content={
-                "error": {"message": item.get("error", "请求被拒绝"), "type": "request_rejected"},
-            })
-
-        # 审批通过
+        # ✅ 当前模式：直通（暂不审批，所有请求自动放行）
+        # TODO: 之后可恢复审批模式（管理员手动放行）
         return await handle_chat(request)
 
 
@@ -197,6 +181,53 @@ async def api_test_mock(request: Request):
     fake_request = Request(scope={"type": "http", "method": "POST", "headers": []})
     fake_request._body = json.dumps(fake_body).encode("utf-8")
     return await chat_completions(fake_request)
+
+
+# ── Session 管理 API ──────────────────────────────────────
+
+
+@app.get("/api/sessions")
+async def api_list_sessions():
+    """列出所有 session（含 active 标记 + message_count / last_used）。"""
+    return {"sessions": sess.list_sessions()}
+
+
+@app.post("/api/sessions/new")
+async def api_new_session(request: Request):
+    """新建 session（调 DeepSeek /chat_session/create，注册到列表并激活）。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    label = body.get("label", "")
+
+    cfg = config.load_config()
+    if not cfg.get("token"):
+        return JSONResponse(status_code=401, content={"ok": False, "error": "未登录"})
+
+    new_sid = ds_api.create_new_session(cfg)
+    if not new_sid:
+        return JSONResponse(status_code=500, content={"ok": False, "error": "创建 session 失败"})
+
+    sess.register_session(new_sid, label=label)
+    sess.activate_session(new_sid)
+    return {"ok": True, "session_id": new_sid, "label": label}
+
+
+@app.post("/api/sessions/activate")
+async def api_activate_session(request: Request):
+    """切换 active session（写 sessions.json + config.json，下次请求走新 session）。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+
+    sid = body.get("session_id", "")
+    if not sid:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "session_id required"})
+
+    ok = sess.activate_session(sid)
+    return {"ok": ok, "session_id": sid if ok else None, "error": None if ok else "session 不存在"}
 
 
 # ── 管理页面 ──────────────────────────────────────────
@@ -325,6 +356,17 @@ button:disabled {{ opacity:.5; cursor:not-allowed; }}
 
 <div class="card">
 <div class="toolbar">
+<h2 style="margin:0">💬 会话列表 <span id="sessionCount" style="font-size:12px;color:#999;font-weight:400"></span></h2>
+<div class="right">
+<button class="btn-ghost" onclick="refreshSessions()">🔄 刷新</button>
+<button class="btn-primary" style="width:auto;padding:8px 14px;margin:0;font-size:13px" onclick="newSession()">➕ 新建会话</button>
+</div>
+</div>
+<div id="sessionList"><div class="empty">点击右上"刷新"加载</div></div>
+</div>
+
+<div class="card">
+<div class="toolbar">
 <h2 style="margin:0">📥 待审批请求 <span id="pendingCount" style="font-size:12px;color:#999;font-weight:400"></span></h2>
 <div class="right">
 <button class="btn-ghost" onclick="refreshPending()">🔄 刷新列表</button>
@@ -372,6 +414,108 @@ const $ = id => document.getElementById(id);
 function escapeHtml(s) {{
     if (s == null) return '';
     return String(s).replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
+}}
+
+/* ── Session 管理 ────────────────────────────────── */
+
+async function refreshSessions() {{
+    const btn = document.querySelector('button[onclick="refreshSessions()"]');
+    if (btn) {{ btn.disabled = true; btn.textContent = '🔄 刷新中…'; }}
+    try {{
+        const r = await fetch('/api/sessions');
+        const d = await r.json();
+        const list = $('sessionList');
+        const ss = d.sessions || [];
+        $('sessionCount').textContent = ss.length ? `(共 ${{ss.length}} 个)` : '';
+        if (ss.length === 0) {{
+            list.innerHTML = '<div class="empty">还没有 session，点右上"新建会话"创建</div>';
+            return;
+        }}
+        list.innerHTML = ss.map(s => renderSessionCard(s)).join('');
+    }} catch(e) {{
+        $('sessionList').innerHTML = '<div class="empty">刷新失败: ' + escapeHtml(e.message) + '</div>';
+    }} finally {{
+        if (btn) {{ btn.disabled = false; btn.textContent = '🔄 刷新'; }}
+    }}
+}}
+
+function renderSessionCard(s) {{
+    const isActive = s.active;
+    const activeBadge = isActive ? '<span class="tag tag-ok">🟢 当前活跃</span>' : '';
+    const lastMid = s.last_message_id ? `parent_message_id=${{s.last_message_id}}` : '无（根消息）';
+    const lastUsed = s.last_used_at ? new Date(s.last_used_at * 1000).toLocaleString('zh-CN') : '-';
+    const created = s.created_at ? new Date(s.created_at * 1000).toLocaleString('zh-CN') : '-';
+    const label = s.label ? `${{escapeHtml(s.label)}} · ` : '';
+    const sidShort = s.session_id ? `${{s.session_id.slice(0, 8)}}…${{s.session_id.slice(-4)}}` : '-';
+    const switchBtn = isActive
+        ? '<button class="btn-toggle" disabled>已激活</button>'
+        : `<button class="btn-approve" onclick="activateSession('${{s.session_id}}')">切换为此</button>`;
+    return `
+        <div class="req-card" style="${{isActive ? 'border-color:#52c41a;background:#f6ffed' : ''}}">
+            <div class="req-head">
+                <div class="req-info">
+                    <div class="req-preview">${{label}}${{escapeHtml(sidShort)}} ${{activeBadge}}</div>
+                    <div class="req-meta">
+                        <b>消息数:</b> ${{s.message_count || 0}} 条
+                        <span>·</span>
+                        <b>续接:</b> ${{escapeHtml(lastMid)}}
+                        <span>·</span>
+                        <b>创建:</b> ${{escapeHtml(created)}}
+                        <span>·</span>
+                        <b>最后使用:</b> ${{escapeHtml(lastUsed)}}
+                    </div>
+                </div>
+                <div class="req-actions">
+                    ${{switchBtn}}
+                </div>
+            </div>
+        </div>
+    `;
+}}
+
+async function newSession() {{
+    const label = prompt('给新会话起个名字（可选）', '');
+    if (label === null) return;  // 取消
+    const btn = document.querySelector('button[onclick="newSession()"]');
+    if (btn) {{ btn.disabled = true; btn.textContent = '⏳ 创建中…'; }}
+    try {{
+        const r = await fetch('/api/sessions/new', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{label: label}}),
+        }});
+        const d = await r.json();
+        if (d.ok) {{
+            showMsg('loginMsg', '✅ 新会话已创建并激活：' + d.session_id.slice(0, 8) + '…', true);
+            refreshSessions();
+        }} else {{
+            showMsg('loginMsg', '❌ ' + (d.error || '创建失败'), false);
+        }}
+    }} catch(e) {{
+        showMsg('loginMsg', '❌ ' + e.message, false);
+    }} finally {{
+        if (btn) {{ btn.disabled = false; btn.textContent = '➕ 新建会话'; }}
+    }}
+}}
+
+async function activateSession(sid) {{
+    if (!confirm('切换到 session ' + sid.slice(0, 8) + '…？\\n\\n下次 Claude Code 发消息会走这个 session。')) return;
+    try {{
+        const r = await fetch('/api/sessions/activate', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{session_id: sid}}),
+        }});
+        const d = await r.json();
+        if (d.ok) {{
+            showMsg('loginMsg', '✅ 已切换到 ' + sid.slice(0, 8) + '…', true);
+            refreshSessions();
+        }} else {{
+            showMsg('loginMsg', '❌ ' + (d.error || '切换失败'), false);
+        }}
+    }} catch(e) {{
+        showMsg('loginMsg', '❌ ' + e.message, false);
+    }}
 }}
 
 /* ── 列表刷新（手动） ─────────────────────────────── */
@@ -690,6 +834,9 @@ function showMsg(id, text, ok) {{
     el.textContent = text;
     el.className = 'msg ' + (ok ? 'msg-ok' : 'msg-err');
 }}
+
+/* 启动时自动加载 session 列表 */
+refreshSessions();
 
 /* 不再自动刷新，需要手动点"刷新列表"按钮 */
 </script>

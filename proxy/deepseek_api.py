@@ -557,6 +557,7 @@ def chat_completion(
                     # 同步持久化到 disk（重启代理也不丢续接）
                     try:
                         sess.set_last_message_id(val)
+                        sess.increment_message_count()
                     except Exception as e:
                         print(f"[Chat] ⚠️ 写 disk 失败: {e}")
                     print(f"[Chat] {session_id[:8]}... captured message_id={val} (内存+disk，下次续接用)")
