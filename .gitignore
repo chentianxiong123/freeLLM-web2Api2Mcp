@@ -1,0 +1,26 @@
+# ── 顶层 exe（不是源码）──
+*.exe
+tauri-app.exe
+uninstall.exe
+
+# ── 临时/空目录 ──
+_up_/
+
+# ── Claude 内部状态（不要提交）──
+.claude/
+
+# ── 参考归档（不跟踪，是 clone 来的源项目）──
+reference_archived/
+
+# ── Python 缓存 ──
+__pycache__/
+*.pyc
+*.pyo
+
+# ── DeepSeek 凭据（不要提交）──
+config.json
+sessions.json
+_last_raw_sse.txt
+
+# ── WASM / 编译产物 ──
+*.wasm
