@@ -351,6 +351,9 @@ def is_claude_housekeeping_request(data: dict) -> bool:
     触发条件（任一）：
     - 最新 user 消息清洗后**完全是空的**（说明只是注入块、没有用户真实输入）
     - 最新 user 消息**只包含** SUGGESTION MODE 之类的 Claude 内部指令
+    - **整个 body 里任一文本块包含** housekeeping 标记（即使被夹在 user 真消息里）
+      （Claude Code 会把 SUGGESTION MODE 模板塞进 user 的 system-reminder 区，
+      我们的清洗已经剥掉了这块，但如果它还出现在 user 文本里 → 整个请求是 housekeeping）
     - body 顶层带 `metadata.claude_code_housekeeping` 之类的标记（预留）
 
     返回 True = 应该丢弃请求，不发给 DeepSeek
@@ -360,16 +363,30 @@ def is_claude_housekeeping_request(data: dict) -> bool:
         # 没提取出任何用户真实文本 → 整个请求是 Claude Code 自己的后台调用
         return True
 
-    # 兜底：如果 prompt 只是 "Reply with only a short suggestion" 之类的固定 housekeeping 文案
+    # 1) 兜底：清洗后 prompt 只是固定 housekeeping 文案
     housekeeping_keywords = [
         "suggest what the user might naturally type",
         "look at the user's recent messages",
         "stay silent if the next step isn't obvious",
         "format: 2-12 words",
         "reply with only the suggestion",
+        "your job is to predict",
+        "first: look at the user's recent messages",
+        "the test: would they think",
     ]
     pl = prompt.lower()
     if any(kw in pl for kw in housekeeping_keywords):
+        return True
+
+    # 2) 扫描整个 body 所有文本块（包括 system / 注入块），含 housekeeping 标记就丢弃
+    housekeeping_markers = [
+        "[suggestion mode",
+        "suggestion mode:",
+        "predict what they would type",
+        "stay silent if the next step isn't obvious",
+    ]
+    body_text = json.dumps(data, ensure_ascii=False).lower() if data else ""
+    if any(m in body_text for m in housekeeping_markers):
         return True
 
     return False

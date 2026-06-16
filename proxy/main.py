@@ -104,7 +104,7 @@ async def chat_completions(request: Request):
             is_housekeeping = False
 
         if is_housekeeping or not clean_prompt_check:
-            print(f"[Housekeeping] 丢弃 Claude Code 后台请求（清洗后 prompt 为空或含 housekeeping 指令）")
+            print(f"[Housekeeping] 丢弃 Claude Code 后台请求（清洗后 prompt 长度={len(clean_prompt_check)}, is_housekeeping={is_housekeeping}）")
             # 返回一个空的 OpenAI 格式响应，让 Claude Code 以为自己收到了正常回复
             # 不计入 token、不发给 DeepSeek、不进 session 历史
             model_name = body.get("model", "deepseek-v4-flash")
