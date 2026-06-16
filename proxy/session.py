@@ -121,7 +121,8 @@ def set_last_message_id(message_id: str | int | None) -> None:
     if not sid:
         return
     s = db.setdefault("sessions", {}).setdefault(sid, {})
-    s["last_message_id"] = str(message_id) if message_id is not None else None
+    # 存原值（int / None / str 兼容历史字符串数据）
+    s["last_message_id"] = message_id
     s["last_used_at"] = time.time()
     db["sessions"][sid] = s
     _save(db)

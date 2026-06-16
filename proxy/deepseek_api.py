@@ -98,9 +98,13 @@ def parse_sse(resp, thinking_enabled: bool = False) -> Any:
             # 顶层字段：SSE 第一帧会带 response_message_id / request_message_id
             # 这是 DeepSeek 给「这条回复对应的 assistant 消息」分配的 id，
             # 下次请求要把它作为 parent_message_id 才能续接。
+            # 统一转 int（DeepSeek 端期望 u32）
             top_message_id = obj.get("response_message_id")
             if top_message_id is not None:
-                yield ("message_id", top_message_id)
+                try:
+                    yield ("message_id", int(top_message_id))
+                except (ValueError, TypeError):
+                    pass
 
             # 错误对象
             obj_type = obj.get("type", "")
@@ -471,7 +475,19 @@ def chat_completion(
         parent_message_id = None
         print(f"[Chat] {session_id[:8]}... → NEW root message")
     else:
-        print(f"[Chat] {session_id[:8]}... → CONTINUE from parent_message_id={parent_message_id}")
+        # DeepSeek 端期望 u32 整数（不要字符串，否则 422）
+        # 兼容 disk 里的历史字符串数据
+        if isinstance(parent_message_id, str):
+            try:
+                parent_message_id = int(parent_message_id)
+            except (ValueError, TypeError):
+                parent_message_id = None
+        elif not isinstance(parent_message_id, int):
+            parent_message_id = None
+        if parent_message_id is not None:
+            print(f"[Chat] {session_id[:8]}... → CONTINUE from parent_message_id={parent_message_id} (int)")
+        else:
+            print(f"[Chat] {session_id[:8]}... → NEW root message (bad mid coerced to null)")
 
     # 构建请求体
     req_body = {
