@@ -45,6 +45,99 @@ def resolve_response_model(model_type: str) -> str:
     return DS_MODEL_TYPE_TO_OPENAI.get(model_type, "deepseek-v4-flash")
 
 
+def _build_conversation_history(body: dict) -> str:
+    """把 OpenAI messages[] 翻译成 DeepSeek 能理解的自然语言对话历史。
+
+    策略：
+    1. 跳过 Claude Code 的 system 消息（已经被剥了，不在这里）
+    2. 按顺序遍历 user / assistant / tool 三种角色
+    3. assistant 消息如果有 tool_calls，还原成 "我调用了 X(args)" 形式
+    4. tool 消息还原成 "工具 X 的执行结果：..." 形式
+    5. 最后一条 user 消息（如果含 system-reminder 等注入块）会被剥掉，只保留真文本
+    6. 全部拼成一段对话日志
+
+    返回：完整的对话历史 + 当前问题（最后一条 user），作为发 DeepSeek 的 user 消息
+    """
+    msgs = body.get("messages", []) or []
+    if not msgs:
+        return ""
+
+    lines: list[str] = []
+
+    for m in msgs:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        tool_calls = m.get("tool_calls")
+
+        if role == "system":
+            continue  # 跳过 Claude Code 系统提示
+
+        if role == "user":
+            text = _extract_text_from_content(content)
+            if text:
+                lines.append(f"[用户]\n{text}")
+
+        elif role == "assistant":
+            text = _extract_text_from_content(content)
+            if text and not tool_calls:
+                lines.append(f"[助手]\n{text}")
+            if tool_calls:
+                # 还原成"我调用了 X"格式
+                for tc in tool_calls:
+                    fn = tc.get("function", {}) or {}
+                    name = fn.get("name", "?")
+                    args = fn.get("arguments", "{}")
+                    lines.append(f"[助手 调用工具] {name}\n参数：{args}")
+                if text:
+                    lines.append(f"[助手]\n{text}")
+
+        elif role == "tool":
+            # 工具结果回灌
+            text = _extract_text_from_content(content)
+            tool_call_id = m.get("tool_call_id", "")
+            # 找对应的工具名（向前回溯最近的 assistant tool_calls）
+            tc_name = _find_tool_name_for_id(msgs, m, tool_call_id)
+            label = f"[工具 {tc_name} 执行结果]" if tc_name else "[工具执行结果]"
+            if text:
+                # 截断超长输出
+                if len(text) > 4000:
+                    text = text[:2000] + "\n...（中间省略）...\n" + text[-1000:]
+                lines.append(f"{label}\n{text}")
+
+    return "\n\n".join(lines)
+
+
+def _find_tool_name_for_id(msgs: list, current_msg: dict, tool_call_id: str) -> str | None:
+    """从历史里找 tool_call_id 对应的工具名。"""
+    if not tool_call_id:
+        return None
+    for m in msgs:
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                if tc.get("id") == tool_call_id:
+                    return (tc.get("function") or {}).get("name")
+    return None
+
+
+def _extract_text_from_content(content) -> str:
+    """从 OpenAI content 字段提取纯文本（兼容 str / list / 含注入块的情况）。"""
+    # 先走 gateway 的清洗逻辑，剥 Claude Code 注入块
+    if isinstance(content, str):
+        # 用 gateway 的清洗
+        return gateway.extract_clean_user_prompt({"messages": [{"role": "user", "content": content}]})
+    if isinstance(content, list):
+        # 拼所有 text 块
+        parts = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                raw = b.get("text", "")
+                cl = gateway.extract_clean_user_prompt({"messages": [{"role": "user", "content": raw}]})
+                if cl:
+                    parts.append(cl)
+        return "\n".join(parts)
+    return ""
+
+
 def _build_tools_injection(tools: list[dict]) -> str:
     """把 OpenAI tools schema 转成 DeepSeek 端能理解的工具列表说明。
 
@@ -269,9 +362,9 @@ async def handle_chat(request: Request):
             "error": {"message": "Not logged in", "type": "authentication_error"},
         })
 
-    # 提取用户消息
-    user_content = gateway.extract_clean_user_prompt(body)
-    if not user_content:
+    # ── 多轮对话翻译：把 messages[] 翻成自然语言对话历史 ──
+    history = _build_conversation_history(body)
+    if not history:
         return JSONResponse(status_code=400, content={
             "error": {"message": "No user message", "type": "invalid_request_error"},
         })
@@ -280,9 +373,9 @@ async def handle_chat(request: Request):
     tools = body.get("tools", []) or []
     tools_injection = _build_tools_injection(tools)
     if tools_injection:
-        user_content = user_content + tools_injection
+        history = history + tools_injection
 
-    ds_messages = [{"role": "user", "content": user_content}]
+    ds_messages = [{"role": "user", "content": history}]
 
     ds_stream = ds_api.chat_completion(
         cfg=cfg,
@@ -300,7 +393,7 @@ async def handle_chat(request: Request):
                 ds_stream,
                 request_id,
                 response_model,
-                prompt_text=user_content,
+                prompt_text=history,
                 tools_schema=tools,
             ),
             media_type="text/event-stream",
