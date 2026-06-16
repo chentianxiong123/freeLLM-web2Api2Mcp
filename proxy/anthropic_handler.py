@@ -86,10 +86,14 @@ async def stream_response(ds_stream, request_id: str, model: str, prompt_text: s
     """DeepSeek 流 → OpenAI SSE 流。
 
     prompt_text: 用于估算 prompt_tokens（如果传入了）
+    total_tokens 来自 DeepSeek accumulated_token_usage 终值（真实数字）
+    completion 估算 = response 实际字符数
+    prompt 估算 = total - completion（不会 < 0）
     """
     role_sent = False
     stop_reason = None
-    total_tokens: int | None = None  # 从 DeepSeek token_usage 抓
+    total_tokens: int | None = None
+    completion_chars: list[str] = []  # 累加响应内容
 
     for etype, val in ds_stream:
         if etype == "thinking":
@@ -99,9 +103,11 @@ async def stream_response(ds_stream, request_id: str, model: str, prompt_text: s
             if not role_sent:
                 role_sent = True
                 yield _chat_chunk(request_id, model, {"role": "assistant", "content": ""})
+            if isinstance(val, str):
+                completion_chars.append(val)
             yield _chat_chunk(request_id, model, {"content": val})
         elif etype == "token_usage":
-            # DeepSeek 端 accumulated_token_usage 终值 = 本次请求 input+output 总数
+            # DeepSeek 端 accumulated_token_usage 终值 = 本次请求 input+output 总数（真实）
             if isinstance(val, (int, float)) and val:
                 total_tokens = int(val)
         elif etype == "error":
@@ -115,11 +121,21 @@ async def stream_response(ds_stream, request_id: str, model: str, prompt_text: s
     if not stop_reason:
         stop_reason = "stop"
 
-    # 流式：end-of-stream 时 yield 一个 usage chunk（OpenAI 客户端 stream_options.include_usage 模式）
+    # 流式：end-of-stream 时 yield 一个 usage chunk
+    # prompt / completion 都是估算（DeepSeek 只给总数）
     if total_tokens is not None:
-        prompt_est = _estimate_prompt_tokens(prompt_text)
-        completion_est = max(0, total_tokens - prompt_est)
+        completion_text = "".join(completion_chars)
+        completion_est = _estimate_prompt_tokens(completion_text)
+        # prompt 估算：total - completion（如果 completion 估大了，prompt 可能为 0）
+        prompt_est = max(0, total_tokens - completion_est)
+        # 如果 completion 估小得离谱（实际 completion 更大），把差值补到 completion
+        if completion_est == 0 and completion_text:
+            # 兜底：至少给 completion 1 token
+            completion_est = max(1, total_tokens - prompt_est)
         yield _usage_chunk(request_id, model, total_tokens, prompt_est, completion_est)
+    else:
+        # 没拿到 token_usage，返回 0（避免发送 None）
+        yield _usage_chunk(request_id, model, 0, 0, 0)
 
     # 最后一条
     if not role_sent:
@@ -188,19 +204,22 @@ async def handle_chat(request: Request):
         total_tokens: int | None = None
         for etype, val in ds_stream:
             if etype == "content":
-                content_parts.append(val)
+                if isinstance(val, str):
+                    content_parts.append(val)
             elif etype == "token_usage":
                 if isinstance(val, (int, float)) and val:
                     total_tokens = int(val)
             elif etype == "done":
                 break
         full_content = "".join(content_parts)
-        prompt_est = _estimate_prompt_tokens(user_content)
+        # prompt / completion 都是估算（DeepSeek 只给 total）
         if total_tokens is None:
-            # 流里没拿到，退化：0
             usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         else:
-            completion_est = max(0, total_tokens - prompt_est)
+            completion_est = _estimate_prompt_tokens(full_content)
+            prompt_est = max(0, total_tokens - completion_est)
+            if completion_est == 0 and full_content:
+                completion_est = max(1, total_tokens - prompt_est)
             usage = {
                 "prompt_tokens": prompt_est,
                 "completion_tokens": completion_est,
