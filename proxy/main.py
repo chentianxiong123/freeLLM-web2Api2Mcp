@@ -98,7 +98,11 @@ async def chat_completions(request: Request):
 
 @app.get("/v1/models")
 async def list_models():
-    """返回可用模型列表（OpenAI 格式）"""
+    """返回可用模型列表（OpenAI 格式）。
+
+    列出的是客户端可以请求的 OpenAI 模型名（不是 DeepSeek 内部 model_type）。
+    内部路由：default -> deepseek-v4-flash, expert -> deepseek-v4-pro
+    """
     models_data = [
         {"id": "deepseek-v4-flash", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
         {"id": "deepseek-v4-pro", "object": "model", "created": 1700000000, "owned_by": "deepseek"},

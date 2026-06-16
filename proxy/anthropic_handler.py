@@ -29,6 +29,20 @@ def resolve_model(openai_model: str) -> tuple[str, bool, str]:
     return ("deepseek-default", True, "default")
 
 
+# DeepSeek model_type → 公开的 OpenAI 模型名（用于响应里回显）
+# 客户端期望看到「实际跑的那个模型」的名字，而不是它自己发的名字（Claude Code 发 claude-sonnet 我们不能回 claude-sonnet）
+DS_MODEL_TYPE_TO_OPENAI = {
+    "default": "deepseek-v4-flash",
+    "expert": "deepseek-v4-pro",
+    "vision": "deepseek-v4-vision",
+}
+
+
+def resolve_response_model(model_type: str) -> str:
+    """DeepSeek 实际用的 model_type → 响应里返回的 OpenAI 模型名。"""
+    return DS_MODEL_TYPE_TO_OPENAI.get(model_type, "deepseek-v4-flash")
+
+
 def _estimate_prompt_tokens(text: str) -> int:
     """估算 prompt token 数（粗略）。
 
@@ -158,6 +172,8 @@ async def handle_chat(request: Request):
     stream = body.get("stream", False)
 
     ds_model, thinking_enabled, model_type = resolve_model(model_name)
+    # 响应里返回的 model：实际用的 DeepSeek 模型（不是 Claude Code 发的名字）
+    response_model = resolve_response_model(model_type)
     request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     cfg = config.load_config()
 
@@ -190,7 +206,7 @@ async def handle_chat(request: Request):
 
     if stream:
         return StreamingResponse(
-            stream_response(ds_stream, request_id, model_name, prompt_text=user_content),
+            stream_response(ds_stream, request_id, response_model, prompt_text=user_content),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -229,7 +245,7 @@ async def handle_chat(request: Request):
             "id": request_id,
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": model_name,
+            "model": response_model,
             "choices": [{
                 "index": 0,
                 "message": {"role": "assistant", "content": full_content},
