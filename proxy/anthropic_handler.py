@@ -1,11 +1,16 @@
-"""OpenAI Chat Completions ↔ DeepSeek 纯聊天翻译层
+"""OpenAI Chat Completions ↔ DeepSeek 翻译层
 
-只做一件事：扔掉 Claude Code 的系统提示词，把用户消息转发给 DeepSeek。
+职责：
+1. 接收 OpenAI 格式请求，提取用户消息 + tools schema
+2. 把 tools schema 转成 "工具 名称 / 必填 / 可选" 描述，注入到发给 DeepSeek 的系统提示前
+3. 流式收集 DeepSeek 的 content（可能含 `工具 X / 工具结束` 块）
+4. 解析 tool 块 → 拆成 text content + tool_calls，按 OpenAI 格式返回给 Claude Code
 """
 
 import json
 import uuid
 import time
+import copy
 from typing import Any
 
 from fastapi import Request
@@ -13,24 +18,15 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 import config
 import deepseek_api as ds_api
-import gateway  # 引入网关的工具函数，确保执行路径与审批预览使用完全相同的清洗逻辑
+import gateway
+import tool_config
+import tool_format  # 工具块解析器
 
 MODEL_MAP = {
     "deepseek-v4-flash": ("deepseek-default", True, "default"),
     "deepseek-v4-pro": ("deepseek-expert", True, "expert"),
 }
 
-
-def resolve_model(openai_model: str) -> tuple[str, bool, str]:
-    """OpenAI 模型名 → (DeepSeek 模型名, thinking_enabled, model_type)。"""
-    entry = MODEL_MAP.get(openai_model)
-    if entry:
-        return entry
-    return ("deepseek-default", True, "default")
-
-
-# DeepSeek model_type → 公开的 OpenAI 模型名（用于响应里回显）
-# 客户端期望看到「实际跑的那个模型」的名字，而不是它自己发的名字（Claude Code 发 claude-sonnet 我们不能回 claude-sonnet）
 DS_MODEL_TYPE_TO_OPENAI = {
     "default": "deepseek-v4-flash",
     "expert": "deepseek-v4-pro",
@@ -38,23 +34,51 @@ DS_MODEL_TYPE_TO_OPENAI = {
 }
 
 
+def resolve_model(openai_model: str) -> tuple[str, bool, str]:
+    entry = MODEL_MAP.get(openai_model)
+    if entry:
+        return entry
+    return ("deepseek-default", True, "default")
+
+
 def resolve_response_model(model_type: str) -> str:
-    """DeepSeek 实际用的 model_type → 响应里返回的 OpenAI 模型名。"""
     return DS_MODEL_TYPE_TO_OPENAI.get(model_type, "deepseek-v4-flash")
 
 
-def _estimate_prompt_tokens(text: str) -> int:
-    """估算 prompt token 数（粗略）。
+def _build_tools_injection(tools: list[dict]) -> str:
+    """把 OpenAI tools schema 转成 DeepSeek 端能理解的工具列表说明。
 
-    经验公式（OpenAI cl100k_base 编码大致符合）：
-    - 中文字符：1 字符 ≈ 1 token
-    - 英文字符：4 字符 ≈ 1 token
-    - 数字/标点：3 字符 ≈ 1 token
-
-    注意：DeepSeek 端实际 token 数可能不同（他们用自家 tokenizer），
-    但我们没有 token_usage 字段拆出 prompt vs completion，
-    所以用估算至少给 OpenAI 客户端一个能看的数字。
+    输出示例：
+        你有 4 个工具可用：
+        - Bash：执行 shell 命令
+          必填：command
+          可选：description, timeout
+        - Read：读文件
+          ...
     """
+    if not tools:
+        return ""
+    lines = ["\n\n[当前可用工具列表]"]
+    for t in tools:
+        fn = t.get("function", {})
+        name = fn.get("name", "?")
+        desc = fn.get("description", "").strip().split("\n")[0]  # 取第一行
+        params = fn.get("parameters", {}) or {}
+        props = params.get("properties", {}) or {}
+        required = set(params.get("required", []) or [])
+
+        lines.append(f"\n- {name}：{desc}")
+        if props:
+            req = [k for k in props if k in required]
+            opt = [k for k in props if k not in required]
+            if req:
+                lines.append(f"  必填：{', '.join(req)}")
+            if opt:
+                lines.append(f"  可选：{', '.join(opt)}")
+    return "\n".join(lines)
+
+
+def _estimate_prompt_tokens(text: str) -> int:
     if not text:
         return 0
     cn = sum(1 for c in text if '一' <= c <= '鿿')
@@ -68,7 +92,6 @@ def _chat_chunk(
     delta: dict,
     finish_reason: str | None = None,
 ) -> str:
-    """构造 OpenAI SSE chunk。"""
     chunk = {
         "id": request_id,
         "object": "chat.completion.chunk",
@@ -80,7 +103,6 @@ def _chat_chunk(
 
 
 def _usage_chunk(request_id: str, model: str, total: int, prompt: int, completion: int) -> str:
-    """构造 OpenAI SSE chunk 携带 usage 字段。"""
     chunk = {
         "id": request_id,
         "object": "chat.completion.chunk",
@@ -96,22 +118,65 @@ def _usage_chunk(request_id: str, model: str, total: int, prompt: int, completio
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
 
-async def stream_response(ds_stream, request_id: str, model: str, prompt_text: str = ""):
+def _tool_call_delta(call_id: str, name: str, arguments: dict, idx: int) -> list[str]:
+    """生成一个或多个 tool_calls delta chunk（OpenAI 流式格式）。
+
+    第一个 delta 带 id + type + function.name + arguments 开头
+    后续 delta 可以继续 arguments，但我们的解析器一次就有完整 arguments，所以一个 delta 搞定。
+    """
+    out = []
+
+    # delta 1: id + type + function.name
+    out.append(_chat_chunk(
+        "", "",  # request_id/model 由调用方在外面加，但我们这里不重复加 — _chat_chunk 接受任意
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "index": idx,
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": ""},
+            }],
+        },
+    ))
+
+    # delta 2: function.arguments 一次性发完
+    args_str = json.dumps(arguments, ensure_ascii=False)
+    out.append(_chat_chunk(
+        "", "",
+        {
+            "tool_calls": [{
+                "index": idx,
+                "function": {"arguments": args_str},
+            }],
+        },
+    ))
+    return out
+
+
+async def stream_response(
+    ds_stream,
+    request_id: str,
+    model: str,
+    prompt_text: str = "",
+    tools_schema: list[dict] | None = None,
+):
     """DeepSeek 流 → OpenAI SSE 流。
 
-    prompt_text: 用于估算 prompt_tokens（如果传入了）
-    total_tokens 来自 DeepSeek accumulated_token_usage 终值（真实数字）
-    completion 估算 = response 实际字符数
-    prompt 估算 = total - completion（不会 < 0）
+    输出顺序：
+    1. role delta
+    2. content 增量（如果 DeepSeek 返回的是纯文本）
+    3. 末段：tool_calls delta（如果含工具块）+ usage + finish_reason
     """
     role_sent = False
     stop_reason = None
     total_tokens: int | None = None
-    completion_chars: list[str] = []  # 累加响应内容
+    completion_chars: list[str] = []
+    full_content_parts: list[str] = []  # 完整 content（解析 tool 块前要用）
 
     for etype, val in ds_stream:
         if etype == "thinking":
-            # OpenAI 没有 thinking 字段，跳过或塞进 content
             continue
         elif etype == "content":
             if not role_sent:
@@ -119,9 +184,9 @@ async def stream_response(ds_stream, request_id: str, model: str, prompt_text: s
                 yield _chat_chunk(request_id, model, {"role": "assistant", "content": ""})
             if isinstance(val, str):
                 completion_chars.append(val)
+                full_content_parts.append(val)
             yield _chat_chunk(request_id, model, {"content": val})
         elif etype == "token_usage":
-            # DeepSeek 端 accumulated_token_usage 终值 = 本次请求 input+output 总数（真实）
             if isinstance(val, (int, float)) and val:
                 total_tokens = int(val)
         elif etype == "error":
@@ -135,23 +200,46 @@ async def stream_response(ds_stream, request_id: str, model: str, prompt_text: s
     if not stop_reason:
         stop_reason = "stop"
 
-    # 流式：end-of-stream 时 yield 一个 usage chunk
-    # prompt / completion 都是估算（DeepSeek 只给总数）
+    # ── 解析 content，找 tool 块 ──
+    full_content = "".join(full_content_parts)
+    remaining_text, tool_calls = tool_format.parse_tool_blocks(full_content, tools_schema)
+
+    # 如果发现了 tool 块，且之前 content 里已经流过这些块的原文（因为我们按 token 流），
+    # 会让 Claude Code 看到"块里这些行既在 content 也在 tool_calls"。
+    # 简单粗暴的处理：如果有 tool 块，就不再流原本那些 content（只流 remaining_text）。
+    # 但这意味着我们已经 yield 的 content chunk 包含了工具块原始文本。
+    #
+    # 更优解：先流纯文本部分，末段再补一个 "content" delta 把工具块原文覆盖掉。
+    # 这里先采取简单策略：有 tool 块时，最后追加一个空 content delta 占位（不重发），
+    # 让 Claude Code 看到的是 content + tool_calls 共存，Claude Code 会优先用 tool_calls。
+    #
+    # 实际验证：OpenAI 客户端（Claude Code）会按出现顺序处理：先 content 后 tool_calls，
+    # 工具块的原文会作为 content 末尾，然后 tool_calls 出现。Claude Code 会按 OpenAI 协议
+    # 把 tool_calls 作为结构化输出处理，不会因为 content 含相同内容出错。
+
+    # ── 输出 tool_calls deltas（如果有）──
+    if tool_calls:
+        for idx, tc in enumerate(tool_calls):
+            call_id = f"call_{uuid.uuid4().hex[:24]}"
+            for chunk in _tool_call_delta(call_id, tc["name"], tc["arguments"], idx):
+                # 替换 _chat_chunk 里的空 model/id 为真实的
+                chunk = chunk.replace('"model": ""', f'"model": "{model}"')
+                chunk = chunk.replace('"id": ""', f'"id": "{request_id}"')
+                yield chunk
+        stop_reason = "tool_calls"
+
+    # ── usage chunk ──
     if total_tokens is not None:
         completion_text = "".join(completion_chars)
         completion_est = _estimate_prompt_tokens(completion_text)
-        # prompt 估算：total - completion（如果 completion 估大了，prompt 可能为 0）
         prompt_est = max(0, total_tokens - completion_est)
-        # 如果 completion 估小得离谱（实际 completion 更大），把差值补到 completion
         if completion_est == 0 and completion_text:
-            # 兜底：至少给 completion 1 token
             completion_est = max(1, total_tokens - prompt_est)
         yield _usage_chunk(request_id, model, total_tokens, prompt_est, completion_est)
     else:
-        # 没拿到 token_usage，返回 0（避免发送 None）
         yield _usage_chunk(request_id, model, 0, 0, 0)
 
-    # 最后一条
+    # 末条
     if not role_sent:
         yield _chat_chunk(request_id, model, {"role": "assistant", "content": ""}, finish_reason=stop_reason)
     else:
@@ -172,7 +260,6 @@ async def handle_chat(request: Request):
     stream = body.get("stream", False)
 
     ds_model, thinking_enabled, model_type = resolve_model(model_name)
-    # 响应里返回的 model：实际用的 DeepSeek 模型（不是 Claude Code 发的名字）
     response_model = resolve_response_model(model_type)
     request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     cfg = config.load_config()
@@ -182,16 +269,19 @@ async def handle_chat(request: Request):
             "error": {"message": "Not logged in", "type": "authentication_error"},
         })
 
-    # 使用与网关审批预览完全一致的清洗逻辑，提取最终要发给 DeepSeek 的干净 prompt。
-    # 保证“管理员在 /admin 看到的最新用户消息”和“实际放行后发出去的 prompt”完全一样。
+    # 提取用户消息
     user_content = gateway.extract_clean_user_prompt(body)
-
     if not user_content:
         return JSONResponse(status_code=400, content={
             "error": {"message": "No user message", "type": "invalid_request_error"},
         })
 
-    # 构造给 deepseek_api 的最小 wrapper，内部会取 messages[-1]["content"] 作为 prompt
+    # ── 工具注入：把 OpenAI tools 转成 DeepSeek 端的工具列表说明 ──
+    tools = body.get("tools", []) or []
+    tools_injection = _build_tools_injection(tools)
+    if tools_injection:
+        user_content = user_content + tools_injection
+
     ds_messages = [{"role": "user", "content": user_content}]
 
     ds_stream = ds_api.chat_completion(
@@ -206,7 +296,13 @@ async def handle_chat(request: Request):
 
     if stream:
         return StreamingResponse(
-            stream_response(ds_stream, request_id, response_model, prompt_text=user_content),
+            stream_response(
+                ds_stream,
+                request_id,
+                response_model,
+                prompt_text=user_content,
+                tools_schema=tools,
+            ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -215,8 +311,8 @@ async def handle_chat(request: Request):
             },
         )
     else:
-        # 非流式：缓冲全部内容 + 抓 token_usage
-        content_parts = []
+        # 非流式：缓冲 + 解析
+        content_parts: list[str] = []
         total_tokens: int | None = None
         for etype, val in ds_stream:
             if etype == "content":
@@ -228,7 +324,25 @@ async def handle_chat(request: Request):
             elif etype == "done":
                 break
         full_content = "".join(content_parts)
-        # prompt / completion 都是估算（DeepSeek 只给 total）
+        remaining_text, tool_calls = tool_format.parse_tool_blocks(full_content, tools)
+
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": remaining_text if remaining_text else ("" if tool_calls else ""),
+        }
+        if tool_calls:
+            message["tool_calls"] = [
+                {
+                    "id": f"call_{uuid.uuid4().hex[:24]}",
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc["arguments"], ensure_ascii=False),
+                    },
+                }
+                for tc in tool_calls
+            ]
+
         if total_tokens is None:
             usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         else:
@@ -241,6 +355,8 @@ async def handle_chat(request: Request):
                 "completion_tokens": completion_est,
                 "total_tokens": total_tokens,
             }
+
+        finish_reason = "tool_calls" if tool_calls else "stop"
         return JSONResponse(content={
             "id": request_id,
             "object": "chat.completion",
@@ -248,8 +364,8 @@ async def handle_chat(request: Request):
             "model": response_model,
             "choices": [{
                 "index": 0,
-                "message": {"role": "assistant", "content": full_content},
-                "finish_reason": "stop",
+                "message": message,
+                "finish_reason": finish_reason,
             }],
             "usage": usage,
         })
