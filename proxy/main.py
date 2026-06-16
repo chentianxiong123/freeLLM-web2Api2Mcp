@@ -91,8 +91,52 @@ async def chat_completions(request: Request):
         # 工具结果回传，自动放行
         return await handle_chat(request)
     else:
-        # ✅ 当前模式：直通（暂不审批，所有请求自动放行）
-        # TODO: 之后可恢复审批模式（管理员手动放行）
+        # === Claude Code 后台 housekeeping 检测 ===
+        # 如果最新 user 消息清洗后是空的，或者就是 SUGGESTION MODE 之类的内部指令，
+        # 整个请求丢弃（不发 DeepSeek），返回 200 + 空 content，避免污染 DeepSeek
+        try:
+            clean_prompt_check = gateway.extract_clean_user_prompt(body)
+        except Exception:
+            clean_prompt_check = ""
+        try:
+            is_housekeeping = gateway.is_claude_housekeeping_request(body)
+        except Exception:
+            is_housekeeping = False
+
+        if is_housekeeping or not clean_prompt_check:
+            print(f"[Housekeeping] 丢弃 Claude Code 后台请求（清洗后 prompt 为空或含 housekeeping 指令）")
+            # 返回一个空的 OpenAI 格式响应，让 Claude Code 以为自己收到了正常回复
+            # 不计入 token、不发给 DeepSeek、不进 session 历史
+            model_name = body.get("model", "deepseek-v4-flash")
+            is_stream = bool(body.get("stream", True))
+            mock_req_id = f"chatcmpl-skip-{uuid.uuid4().hex[:12]}"
+
+            if is_stream:
+                async def skip_stream():
+                    created_ts = int(time.time())
+                    yield f"data: {json.dumps({'id': mock_req_id, 'object': 'chat.completion.chunk', 'created': created_ts, 'model': model_name, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': ''}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'id': mock_req_id, 'object': 'chat.completion.chunk', 'created': created_ts, 'model': model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]}, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                return StreamingResponse(
+                    skip_stream(),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                )
+            else:
+                return JSONResponse(content={
+                    "id": mock_req_id,
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model_name,
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": ""},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                })
+
+        # ✅ 正常请求：直通（暂不审批）
         return await handle_chat(request)
 
 
