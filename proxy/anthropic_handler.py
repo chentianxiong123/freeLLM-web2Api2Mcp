@@ -29,6 +29,25 @@ def resolve_model(openai_model: str) -> tuple[str, bool, str]:
     return ("deepseek-default", True, "default")
 
 
+def _estimate_prompt_tokens(text: str) -> int:
+    """估算 prompt token 数（粗略）。
+
+    经验公式（OpenAI cl100k_base 编码大致符合）：
+    - 中文字符：1 字符 ≈ 1 token
+    - 英文字符：4 字符 ≈ 1 token
+    - 数字/标点：3 字符 ≈ 1 token
+
+    注意：DeepSeek 端实际 token 数可能不同（他们用自家 tokenizer），
+    但我们没有 token_usage 字段拆出 prompt vs completion，
+    所以用估算至少给 OpenAI 客户端一个能看的数字。
+    """
+    if not text:
+        return 0
+    cn = sum(1 for c in text if '一' <= c <= '鿿')
+    other = len(text) - cn
+    return cn + max(1, other // 4)
+
+
 def _chat_chunk(
     request_id: str,
     model: str,
@@ -46,10 +65,31 @@ def _chat_chunk(
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
 
-async def stream_response(ds_stream, request_id: str, model: str):
-    """DeepSeek 流 → OpenAI SSE 流。"""
+def _usage_chunk(request_id: str, model: str, total: int, prompt: int, completion: int) -> str:
+    """构造 OpenAI SSE chunk 携带 usage 字段。"""
+    chunk = {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
+        "usage": {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": total,
+        },
+    }
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+
+async def stream_response(ds_stream, request_id: str, model: str, prompt_text: str = ""):
+    """DeepSeek 流 → OpenAI SSE 流。
+
+    prompt_text: 用于估算 prompt_tokens（如果传入了）
+    """
     role_sent = False
     stop_reason = None
+    total_tokens: int | None = None  # 从 DeepSeek token_usage 抓
 
     for etype, val in ds_stream:
         if etype == "thinking":
@@ -60,6 +100,10 @@ async def stream_response(ds_stream, request_id: str, model: str):
                 role_sent = True
                 yield _chat_chunk(request_id, model, {"role": "assistant", "content": ""})
             yield _chat_chunk(request_id, model, {"content": val})
+        elif etype == "token_usage":
+            # DeepSeek 端 accumulated_token_usage 终值 = 本次请求 input+output 总数
+            if isinstance(val, (int, float)) and val:
+                total_tokens = int(val)
         elif etype == "error":
             yield _chat_chunk(request_id, model, {"content": f"[错误] {val}"}, finish_reason="stop")
             yield "data: [DONE]\n\n"
@@ -70,6 +114,12 @@ async def stream_response(ds_stream, request_id: str, model: str):
 
     if not stop_reason:
         stop_reason = "stop"
+
+    # 流式：end-of-stream 时 yield 一个 usage chunk（OpenAI 客户端 stream_options.include_usage 模式）
+    if total_tokens is not None:
+        prompt_est = _estimate_prompt_tokens(prompt_text)
+        completion_est = max(0, total_tokens - prompt_est)
+        yield _usage_chunk(request_id, model, total_tokens, prompt_est, completion_est)
 
     # 最后一条
     if not role_sent:
@@ -124,7 +174,7 @@ async def handle_chat(request: Request):
 
     if stream:
         return StreamingResponse(
-            stream_response(ds_stream, request_id, model_name),
+            stream_response(ds_stream, request_id, model_name, prompt_text=user_content),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -133,14 +183,29 @@ async def handle_chat(request: Request):
             },
         )
     else:
-        # 非流式：缓冲全部内容
+        # 非流式：缓冲全部内容 + 抓 token_usage
         content_parts = []
+        total_tokens: int | None = None
         for etype, val in ds_stream:
             if etype == "content":
                 content_parts.append(val)
+            elif etype == "token_usage":
+                if isinstance(val, (int, float)) and val:
+                    total_tokens = int(val)
             elif etype == "done":
                 break
         full_content = "".join(content_parts)
+        prompt_est = _estimate_prompt_tokens(user_content)
+        if total_tokens is None:
+            # 流里没拿到，退化：0
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        else:
+            completion_est = max(0, total_tokens - prompt_est)
+            usage = {
+                "prompt_tokens": prompt_est,
+                "completion_tokens": completion_est,
+                "total_tokens": total_tokens,
+            }
         return JSONResponse(content={
             "id": request_id,
             "object": "chat.completion",
@@ -151,5 +216,5 @@ async def handle_chat(request: Request):
                 "message": {"role": "assistant", "content": full_content},
                 "finish_reason": "stop",
             }],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "usage": usage,
         })
