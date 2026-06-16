@@ -176,6 +176,7 @@ def list_sessions() -> list[dict]:
             "label": s.get("label", ""),
             "last_message_id": s.get("last_message_id"),
             "message_count": s.get("message_count", 0),
+            "prompt_tokens": s.get("prompt_tokens", 0),  # 本 session 累计 token
             "created_at": s.get("created_at"),
             "last_used_at": s.get("last_used_at"),
         })

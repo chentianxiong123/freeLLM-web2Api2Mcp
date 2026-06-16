@@ -350,7 +350,7 @@ button:disabled {{ opacity:.5; cursor:not-allowed; }}
 <div class="status-item"><span class="label">登录状态</span><span class="tag {'tag-ok' if cfg.get('token') else 'tag-fail'}">{'✅ 已登录' if cfg.get('token') else '❌ 未登录'}</span></div>
 <div class="status-item"><span class="label">Token</span><span class="value">{(cfg.get('token','')[:24]+'…') if cfg.get('token') else '空'}</span></div>
 <div class="status-item"><span class="label">会话 ID</span><span class="value">{(cfg.get('session_id','')[:24]+'…') if cfg.get('session_id') else '空'}</span></div>
-<div class="status-item"><span class="label">Token 用量</span><span class="value">{usage.get('prompt_tokens',0)} / {usage.get('threshold',900000)}</span></div>
+<div class="status-item"><span class="label">本 session 累计 token</span><span class="value">{usage.get('prompt_tokens',0)}</span></div>
 <div class="status-item"><span class="label">监听端口</span><span class="value">{cfg.get('port',8080)}</span></div>
 </div>
 
@@ -457,6 +457,8 @@ function renderSessionCard(s) {{
                     <div class="req-preview">${{label}}${{escapeHtml(sidShort)}} ${{activeBadge}}</div>
                     <div class="req-meta">
                         <b>消息数:</b> ${{s.message_count || 0}} 条
+                        <span>·</span>
+                        <b>累计 token:</b> ${{s.prompt_tokens || 0}}
                         <span>·</span>
                         <b>续接:</b> ${{escapeHtml(lastMid)}}
                         <span>·</span>

@@ -24,3 +24,10 @@ _last_raw_sse.txt
 
 # ── WASM / 编译产物 ──
 *.wasm
+
+# ── 临时测试/调试脚本 ──
+_test_*.py
+_debug_*.py
+_dump_*.py
+*.disabled.py
+_last_raw_sse.txt

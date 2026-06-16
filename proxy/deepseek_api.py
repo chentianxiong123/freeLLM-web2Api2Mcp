@@ -178,6 +178,23 @@ def parse_sse(resp, thinking_enabled: bool = False) -> Any:
                     phase = "thinking"
                     if isinstance(val, str) and val:
                         yield ("thinking", val)
+
+            # Token 用量（BATCH 终值，例如 [accumulated_token_usage, quasi_status]）
+            if path == "response" and obj.get("o") == "BATCH" and isinstance(val, list):
+                for item in val:
+                    if isinstance(item, dict) and item.get("p") == "accumulated_token_usage":
+                        tok = item.get("v")
+                        if isinstance(tok, (int, float)) and tok:
+                            yield ("token_usage", int(tok))
+                continue
+            # 顶层 response 详情里的 initial accumulated_token_usage（响应开始时的值，通常是 0）
+            if isinstance(val, dict):
+                inner = val.get("response", {})
+                if isinstance(inner, dict) and "accumulated_token_usage" in inner:
+                    tok = inner["accumulated_token_usage"]
+                    if isinstance(tok, (int, float)) and tok:
+                        yield ("token_usage", int(tok))
+
             elif path:
                 continue  # 其他元数据
             elif isinstance(val, str) and val:
@@ -549,6 +566,7 @@ def chat_completion(
 
         # 把 SSE 解析包一层：抓到 message_id 时写进缓存 + yield 给上游
         captured_id: list = []
+        captured_tokens: list[int] = []  # 抓 accumulated_token_usage 终值（本次请求消耗）
         for etype, val in parse_sse(resp, thinking_enabled=thinking_enabled):
             if etype == "message_id":
                 captured_id.append(val)
@@ -558,13 +576,21 @@ def chat_completion(
                     try:
                         sess.set_last_message_id(val)
                         sess.increment_message_count()
+                        # 抓 token 终值时累加
+                        if captured_tokens:
+                            sess.add_tokens(captured_tokens[-1])
+                            print(f"[Chat] {session_id[:8]}... 本次 token 消耗={captured_tokens[-1]} (累计已写 disk)")
                     except Exception as e:
                         print(f"[Chat] ⚠️ 写 disk 失败: {e}")
                     print(f"[Chat] {session_id[:8]}... captured message_id={val} (内存+disk，下次续接用)")
+            elif etype == "token_usage":
+                captured_tokens.append(val)
             yield (etype, val)
 
         if not captured_id and capture_message_id:
             print(f"[Chat] {session_id[:8]}... ⚠️ 流里没拿到 message_id，下次会被当成 NEW root")
+        if not captured_tokens:
+            print(f"[Chat] {session_id[:8]}... ⚠️ 流里没拿到 token_usage 字段（DeepSeek 端可能没返回）")
 
     except Exception as e:
         print(f"[Chat] Exception: {e}")
