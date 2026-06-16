@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "r001",
+      "name": "清洗后空 prompt",
+      "type": "empty_clean_prompt",
+      "scope": "any",
+      "enabled": true,
+      "note": "整条 user 消息剥掉所有注入块后为空 → 整条请求是 Claude Code 后台 housekeeping",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    },
+    {
+      "id": "r002",
+      "name": "SUGGESTION MODE",
+      "type": "keyword_substring",
+      "pattern": "suggestion mode",
+      "scope": "body",
+      "case_sensitive": false,
+      "enabled": true,
+      "note": "Claude Code 后台让模型预测用户下一句——绝不应该发给 DeepSeek",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    },
+    {
+      "id": "r003",
+      "name": "predict what they would type",
+      "type": "keyword_substring",
+      "pattern": "predict what they would type",
+      "scope": "body",
+      "case_sensitive": false,
+      "enabled": true,
+      "note": "SUGGESTION MODE 内置模板",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    },
+    {
+      "id": "r004",
+      "name": "stay silent if next step not obvious",
+      "type": "keyword_substring",
+      "pattern": "stay silent if the next step isn't obvious",
+      "scope": "body",
+      "case_sensitive": false,
+      "enabled": true,
+      "note": "SUGGESTION MODE 内置模板",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    },
+    {
+      "id": "r005",
+      "name": "suggest what user might naturally type",
+      "type": "keyword_substring",
+      "pattern": "suggest what the user might naturally type",
+      "scope": "body",
+      "case_sensitive": false,
+      "enabled": true,
+      "note": "SUGGESTION MODE 内置模板",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    },
+    {
+      "id": "r006",
+      "name": "your job is to predict",
+      "type": "keyword_substring",
+      "pattern": "your job is to predict",
+      "scope": "body",
+      "case_sensitive": false,
+      "enabled": true,
+      "note": "Claude 后台指令",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    },
+    {
+      "id": "r007",
+      "name": "format: 2-12 words",
+      "type": "keyword_substring",
+      "pattern": "format: 2-12 words",
+      "scope": "body",
+      "case_sensitive": false,
+      "enabled": true,
+      "note": "SUGGESTION MODE 输出格式要求",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    },
+    {
+      "id": "r008",
+      "name": "reply with only the suggestion",
+      "type": "keyword_substring",
+      "pattern": "reply with only the suggestion",
+      "scope": "body",
+      "case_sensitive": false,
+      "enabled": true,
+      "note": "SUGGESTION MODE 输出格式要求",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    },
+    {
+      "id": "r009",
+      "name": "first: look at user's recent messages",
+      "type": "keyword_substring",
+      "pattern": "first: look at the user's recent messages",
+      "scope": "body",
+      "case_sensitive": false,
+      "enabled": true,
+      "note": "SUGGESTION MODE 内置模板",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    },
+    {
+      "id": "r010",
+      "name": "the test: would they think",
+      "type": "keyword_substring",
+      "pattern": "the test: would they think",
+      "scope": "body",
+      "case_sensitive": false,
+      "enabled": true,
+      "note": "SUGGESTION MODE 内置模板",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    },
+    {
+      "id": "r011",
+      "name": "look at user's recent messages",
+      "type": "keyword_substring",
+      "pattern": "look at the user's recent messages",
+      "scope": "body",
+      "case_sensitive": false,
+      "enabled": true,
+      "note": "SUGGESTION MODE 内置模板",
+      "created_at": 1781600079,
+      "updated_at": 1781600079
+    }
+  ]
+}

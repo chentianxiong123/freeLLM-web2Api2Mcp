@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import asyncio
 import json
+import time
 import uuid
 
 from fastapi import FastAPI, Request
@@ -26,6 +27,7 @@ import config
 import deepseek_api as ds_api
 import session as sess
 import gateway
+import rules
 
 app = FastAPI(
     title="DeepSeek Web Agent Proxy",
@@ -91,20 +93,20 @@ async def chat_completions(request: Request):
         # 工具结果回传，自动放行
         return await handle_chat(request)
     else:
-        # === Claude Code 后台 housekeeping 检测 ===
-        # 如果最新 user 消息清洗后是空的，或者就是 SUGGESTION MODE 之类的内部指令，
-        # 整个请求丢弃（不发 DeepSeek），返回 200 + 空 content，避免污染 DeepSeek
+        # === 违规请求拦截（走可配置规则引擎）===
         try:
             clean_prompt_check = gateway.extract_clean_user_prompt(body)
         except Exception:
             clean_prompt_check = ""
         try:
-            is_housekeeping = gateway.is_claude_housekeeping_request(body)
+            blocked, matched_rule = rules.is_blocked(body, clean_prompt_check)
         except Exception:
-            is_housekeeping = False
+            blocked, matched_rule = False, None
 
-        if is_housekeeping or not clean_prompt_check:
-            print(f"[Housekeeping] 丢弃 Claude Code 后台请求（清洗后 prompt 长度={len(clean_prompt_check)}, is_housekeeping={is_housekeeping}）")
+        if blocked:
+            rule_name = matched_rule.get("name", "?") if matched_rule else "?"
+            rule_id = matched_rule.get("id", "?") if matched_rule else "?"
+            print(f"[Rules] 拦截请求（命中规则 {rule_id} · {rule_name}）")
             # 返回一个空的 OpenAI 格式响应，让 Claude Code 以为自己收到了正常回复
             # 不计入 token、不发给 DeepSeek、不进 session 历史
             model_name = body.get("model", "deepseek-v4-flash")
@@ -229,6 +231,140 @@ async def api_test_mock(request: Request):
     fake_request = Request(scope={"type": "http", "method": "POST", "headers": []})
     fake_request._body = json.dumps(fake_body).encode("utf-8")
     return await chat_completions(fake_request)
+
+
+# ── 违规拦截规则 API ──────────────────────────────
+
+
+@app.get("/api/rules")
+async def api_list_rules():
+    """列出所有拦截规则。"""
+    return {"rules": rules.list_rules()}
+
+
+@app.post("/api/rules/add")
+async def api_add_rule(request: Request):
+    """新增规则。body: {name, type, pattern?, scope?, case_sensitive?, enabled?, note?}"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    new_rule = rules.add_rule(body)
+    return {"ok": True, "rule": new_rule}
+
+
+@app.post("/api/rules/update/{rule_id}")
+async def api_update_rule(rule_id: str, request: Request):
+    """部分更新规则。body: 任意字段。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    updated = rules.update_rule(rule_id, body)
+    if not updated:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "rule 不存在"})
+    return {"ok": True, "rule": updated}
+
+
+@app.post("/api/rules/delete/{rule_id}")
+async def api_delete_rule(rule_id: str):
+    """删除规则。"""
+    ok = rules.delete_rule(rule_id)
+    return {"ok": ok, "id": rule_id}
+
+
+@app.post("/api/rules/toggle/{rule_id}")
+async def api_toggle_rule(rule_id: str, request: Request):
+    """切换 enabled。body: {enabled?: bool}（不传则反转）"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    updated = rules.toggle_rule(rule_id, body.get("enabled"))
+    if not updated:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "rule 不存在"})
+    return {"ok": True, "rule": updated}
+
+
+@app.post("/api/rules/reset")
+async def api_reset_rules():
+    """重置为默认规则集。"""
+    new_rules = rules.reset_to_defaults()
+    return {"ok": True, "rules": new_rules}
+
+
+@app.post("/api/rules/test")
+async def api_test_rules(request: Request):
+    """测试：拿一段 user 消息 / body，看会被哪些规则命中。
+
+    body: {prompt?: str, body?: dict}
+    返回 {hits: [...], blocked: bool, first_hit?: {...}}
+    """
+    try:
+        req_body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+
+    # 构造一个 body
+    body = req_body.get("body")
+    if not isinstance(body, dict):
+        prompt = req_body.get("prompt", "")
+        body = {
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+    clean_prompt = ""
+    try:
+        clean_prompt = gateway.extract_clean_user_prompt(body)
+    except Exception:
+        pass
+
+    # 模拟 rules.is_blocked 的遍历但收集所有命中
+    import json as _json
+    full_body_text = _json.dumps(body, ensure_ascii=False, default=str) if body else ""
+
+    hits = []
+    blocked = False
+    first_hit = None
+    for r in rules.list_rules():
+        if not r.get("enabled", True):
+            continue
+        rtype = r.get("type", "")
+        scope = r.get("scope", "body")
+        pattern = r.get("pattern", "")
+        text = full_body_text if scope in ("body", "any") else clean_prompt
+
+        matched = False
+        if rtype == "empty_clean_prompt":
+            matched = not clean_prompt.strip()
+        elif pattern:
+            haystack = text if r.get("case_sensitive", False) else text.lower()
+            needle = pattern if r.get("case_sensitive", False) else pattern.lower()
+            if rtype == "keyword_substring":
+                matched = needle in haystack
+            elif rtype == "regex":
+                import re
+                flags = 0 if r.get("case_sensitive", False) else re.IGNORECASE
+                try:
+                    matched = bool(re.search(pattern, text, flags))
+                except re.error:
+                    pass
+
+        if matched:
+            hits.append(r)
+            if not blocked:
+                blocked = True
+                first_hit = r
+
+    return {
+        "ok": True,
+        "clean_prompt_len": len(clean_prompt),
+        "clean_prompt_preview": clean_prompt[:200],
+        "blocked": blocked,
+        "first_hit": first_hit,
+        "hits": hits,
+    }
 
 
 # ── Session 管理 API ──────────────────────────────────────
@@ -440,6 +576,19 @@ button:disabled {{ opacity:.5; cursor:not-allowed; }}
       <button class="btn-ghost" onclick="closeModal()">关闭</button>
     </div>
   </div>
+</div>
+
+<div class="card">
+<div class="toolbar">
+<h2 style="margin:0">🛡️ 违规拦截规则 <span id="ruleCount" style="font-size:12px;color:#999;font-weight:400"></span></h2>
+<div class="right">
+<button class="btn-ghost" onclick="testRules()">🧪 测试</button>
+<button class="btn-ghost" onclick="resetRules()">↺ 重置默认</button>
+<button class="btn-ghost" onclick="refreshRules()">🔄 刷新</button>
+<button class="btn-primary" style="width:auto;padding:8px 14px;margin:0;font-size:13px" onclick="openRuleForm()">➕ 新增规则</button>
+</div>
+</div>
+<div id="ruleList"><div class="empty">点击右上"刷新"加载</div></div>
 </div>
 
 <div class="card">
@@ -889,6 +1038,241 @@ function showMsg(id, text, ok) {{
 refreshSessions();
 
 /* 不再自动刷新，需要手动点"刷新列表"按钮 */
+
+/* ── 违规拦截规则 ─────────────────────────────── */
+
+async function refreshRules() {{
+    const btn = document.querySelector('button[onclick="refreshRules()"]');
+    if (btn) {{ btn.disabled = true; btn.textContent = '🔄 刷新中…'; }}
+    try {{
+        const r = await fetch('/api/rules');
+        const d = await r.json();
+        const list = $('ruleList');
+        const rs = d.rules || [];
+        $('ruleCount').textContent = rs.length ? `(共 ${{rs.length}} 条 · ${{rs.filter(x=>x.enabled).length}} 启用)` : '';
+        if (rs.length === 0) {{
+            list.innerHTML = '<div class="empty">还没有规则，点右上"新增规则"创建</div>';
+            return;
+        }}
+        list.innerHTML = rs.map(r => renderRuleCard(r)).join('');
+    }} catch(e) {{
+        $('ruleList').innerHTML = '<div class="empty">刷新失败: ' + escapeHtml(e.message) + '</div>';
+    }} finally {{
+        if (btn) {{ btn.disabled = false; btn.textContent = '🔄 刷新'; }}
+    }}
+}}
+
+function renderRuleCard(r) {{
+    const onOff = r.enabled
+        ? '<span class="tag tag-ok">✅ 启用</span>'
+        : '<span class="tag" style="background:#f5f5f5;color:#999">⏸ 停用</span>';
+    const typeLabel = r.type === 'keyword_substring' ? '关键词' : (r.type === 'regex' ? '正则' : (r.type === 'empty_clean_prompt' ? '空 prompt' : r.type));
+    const scopeLabel = r.scope === 'body' ? '全文' : (r.scope === 'clean_prompt' ? '清洗后 prompt' : (r.scope === 'user_text_blocks' ? '用户 text 块' : r.scope));
+    const patHtml = r.pattern ? `<code style="background:#f5f5f5;padding:1px 6px;border-radius:3px;font-size:12px">${{escapeHtml(r.pattern)}}</code>` : '<span style="color:#bbb">（无）</span>';
+    const note = r.note ? `<div style="font-size:12px;color:#888;margin-top:4px">${{escapeHtml(r.note)}}</div>` : '';
+    const toggleBtn = r.enabled
+        ? `<button class="btn-toggle" onclick="toggleRule('${{r.id}}', false)">停用</button>`
+        : `<button class="btn-approve" onclick="toggleRule('${{r.id}}', true)">启用</button>`;
+    return `
+        <div class="req-card" style="${{r.enabled ? '' : 'opacity:.55'}}">
+            <div class="req-head">
+                <div class="req-info">
+                    <div class="req-preview">${{onOff}} <b>${{escapeHtml(r.name)}}</b> <span style="color:#999;font-size:12px">${{escapeHtml(r.id)}}</span></div>
+                    <div class="req-meta">
+                        <b>类型:</b> ${{escapeHtml(typeLabel)}}
+                        <span>·</span>
+                        <b>范围:</b> ${{escapeHtml(scopeLabel)}}
+                        ${{r.case_sensitive ? '<span>·</span><b>区分大小写</b>' : ''}}
+                        <span>·</span>
+                        <b>pattern:</b> ${{patHtml}}
+                    </div>
+                    ${{note}}
+                </div>
+                <div class="req-actions">
+                    ${{toggleBtn}}
+                    <button class="btn-toggle" onclick="openRuleForm('${{r.id}}')">编辑</button>
+                    <button class="btn-reject" onclick="deleteRule('${{r.id}}')">删</button>
+                </div>
+            </div>
+        </div>
+    `;
+}}
+
+async function toggleRule(rid, enabled) {{
+    try {{
+        const r = await fetch('/api/rules/toggle/' + rid, {{
+            method: 'POST',
+            headers: {{'Content-Type':'application/json'}},
+            body: JSON.stringify({{enabled: enabled}}),
+        }});
+        const d = await r.json();
+        if (d.ok) refreshRules();
+        else alert('切换失败：' + (d.error || ''));
+    }} catch(e) {{ alert('切换失败：' + e.message); }}
+}}
+
+async function deleteRule(rid) {{
+    if (!confirm('确定要删除规则 ' + rid + ' 吗？')) return;
+    try {{
+        const r = await fetch('/api/rules/delete/' + rid, {{method:'POST'}});
+        const d = await r.json();
+        if (d.ok) refreshRules();
+        else alert('删除失败');
+    }} catch(e) {{ alert('删除失败：' + e.message); }}
+}}
+
+async function resetRules() {{
+    if (!confirm('确认重置为默认规则集？（已自定义的规则会丢失）')) return;
+    try {{
+        const r = await fetch('/api/rules/reset', {{method:'POST'}});
+        const d = await r.json();
+        if (d.ok) refreshRules();
+        else alert('重置失败');
+    }} catch(e) {{ alert('重置失败：' + e.message); }}
+}}
+
+function openRuleForm(rid) {{
+    const isEdit = !!rid;
+    const title = isEdit ? '编辑规则 · ' + rid : '新增规则';
+    const html = `
+        <form id="ruleForm" onsubmit="return submitRuleForm(event, '${{rid || ''}}')">
+            <label>规则名称 *</label>
+            <input name="name" required placeholder="比如：SUGGESTION MODE">
+            <label>类型 *</label>
+            <select name="type">
+                <option value="keyword_substring">关键词子串（含则命中）</option>
+                <option value="regex">正则</option>
+                <option value="empty_clean_prompt">清洗后空 prompt（不需要 pattern）</option>
+            </select>
+            <label>范围</label>
+            <select name="scope">
+                <option value="body">全文 body JSON</option>
+                <option value="clean_prompt">清洗后 prompt（剥过注入块）</option>
+                <option value="user_text_blocks">所有 user 消息的 text 块拼接</option>
+            </select>
+            <label>pattern（关键词或正则）</label>
+            <input name="pattern" placeholder="空 prompt 类型不用填">
+            <label style="display:flex;align-items:center;gap:6px">
+                <input type="checkbox" name="case_sensitive" style="width:auto">区分大小写
+            </label>
+            <label style="display:flex;align-items:center;gap:6px">
+                <input type="checkbox" name="enabled" checked style="width:auto">启用
+            </label>
+            <label>备注（说明这条规则挡什么）</label>
+            <input name="note" placeholder="比如：Claude Code 后台让模型预测用户下一句">
+            <div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">
+                <button type="button" class="btn-ghost" onclick="closeRuleForm()">取消</button>
+                <button type="submit" class="btn-primary" style="width:auto;margin:0;padding:10px 20px">${{isEdit ? '保存' : '创建'}}</button>
+            </div>
+        </form>
+    `;
+    openModalRaw(title, html, false);
+
+    if (isEdit) {{
+        // 拉详情填进去
+        fetch('/api/rules').then(r => r.json()).then(d => {{
+            const target = (d.rules || []).find(x => x.id === rid);
+            if (!target) return;
+            const f = $('ruleForm');
+            f.name.value = target.name || '';
+            f.type.value = target.type || 'keyword_substring';
+            f.scope.value = target.scope || 'body';
+            f.pattern.value = target.pattern || '';
+            f.case_sensitive.checked = !!target.case_sensitive;
+            f.enabled.checked = target.enabled !== false;
+            f.note.value = target.note || '';
+        }});
+    }}
+}}
+
+async function submitRuleForm(ev, rid) {{
+    ev.preventDefault();
+    const f = ev.target;
+    const body = {{
+        name: f.name.value.trim(),
+        type: f.type.value,
+        scope: f.scope.value,
+        pattern: f.pattern.value,
+        case_sensitive: f.case_sensitive.checked,
+        enabled: f.enabled.checked,
+        note: f.note.value.trim(),
+    }};
+    try {{
+        let r;
+        if (rid) {{
+            r = await fetch('/api/rules/update/' + rid, {{
+                method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(body),
+            }});
+        }} else {{
+            r = await fetch('/api/rules/add', {{
+                method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(body),
+            }});
+        }}
+        const d = await r.json();
+        if (d.ok) {{
+            closeRuleForm();
+            refreshRules();
+        }} else {{
+            alert('失败：' + (d.error || ''));
+        }}
+    }} catch(e) {{ alert('失败：' + e.message); }}
+    return false;
+}}
+
+function openModalRaw(title, bodyHtml, withFoot) {{
+    $('modalTitle').textContent = title;
+    $('modalMeta').textContent = '';
+    $('modalBody').innerHTML = bodyHtml;
+    $('modalFoot').innerHTML = withFoot
+        ? '<button class="btn-ghost" onclick="closeModal()">关闭</button>'
+        : '<button class="btn-ghost" onclick="closeRuleForm()">关闭</button>';
+    $('modal').classList.add('open');
+}}
+
+function closeRuleForm() {{ closeModal(); refreshRules(); }}
+
+/* 测试规则命中 */
+function testRules() {{
+    const html = `
+        <div>
+            <label>输入要测试的 prompt（也可以直接发 JSON body）</label>
+            <textarea id="testPrompt" rows="6" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px" placeholder="比如：&#10;[SUGGESTION MODE: Predict what the user might naturally type next]"></textarea>
+            <div style="display:flex;gap:8px;margin-top:10px;justify-content:flex-end">
+                <button class="btn-ghost" onclick="closeModal()">关闭</button>
+                <button class="btn-primary" style="width:auto;margin:0;padding:8px 16px" onclick="runRuleTest()">运行测试</button>
+            </div>
+            <div id="testResult" style="margin-top:14px"></div>
+        </div>
+    `;
+    openModalRaw('🧪 规则命中测试', html, false);
+}}
+
+async function runRuleTest() {{
+    const prompt = $('testPrompt').value;
+    const r = await fetch('/api/rules/test', {{
+        method:'POST', headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify({{prompt: prompt}}),
+    }});
+    const d = await r.json();
+    const out = $('testResult');
+    if (d.blocked) {{
+        const f = d.first_hit || {{}};
+        out.innerHTML = `
+            <div class="msg msg-err" style="margin:0">
+                <b>🚫 会被拦截</b>（命中规则 ${{escapeHtml(f.id || '?')}} · ${{escapeHtml(f.name || '?')}}）
+            </div>
+            <div style="font-size:12px;color:#888;margin-top:6px">清洗后 prompt 长度 = ${{d.clean_prompt_len}} · 预览：${{escapeHtml(d.clean_prompt_preview || '(空)')}}</div>
+            <div style="margin-top:8px;font-size:12px;color:#666">共命中 ${{d.hits.length}} 条规则：${{d.hits.map(h=>h.id+'·'+h.name).join('， ')}}</div>
+        `;
+    }} else {{
+        out.innerHTML = `
+            <div class="msg msg-ok" style="margin:0">
+                <b>✅ 不会被拦截</b>（${{d.hits.length}} 条规则命中但未达 blocked 阈值 / 或全部不命中）
+            </div>
+            <div style="font-size:12px;color:#888;margin-top:6px">清洗后 prompt 长度 = ${{d.clean_prompt_len}} · 预览：${{escapeHtml(d.clean_prompt_preview || '(空)')}}</div>
+        `;
+    }}
+}}
 </script>
 </body>
 </html>"""
