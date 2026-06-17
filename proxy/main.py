@@ -22,13 +22,15 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 
-from anthropic_handler import handle_chat
+from core.chat_handler import stream_chat_to_sse
+from providers.mock import ScriptedProvider, BashListProvider
 import config
 import deepseek_api as ds_api
 import session as sess
 import gateway
 import rules
 import tool_config
+import tool_format
 from admin_page import render_admin_html
 
 app = FastAPI(
@@ -63,7 +65,18 @@ async def error_middleware(request: Request, call_next):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    """Chat Completions API 端点（走网关审批）"""
+    """OpenAI Chat Completions 端点 — v2 架构（react_loop + Provider）。
+
+    旧版 200 行的 react 内联 + housekeeping + rules + handle_chat 全部委托给
+    core.chat_handler.stream_chat_to_sse。
+
+    行为：
+      - housekeeping → 返空 stop
+      - rules 拦截 → 返空 stop
+      - 否则 → 调 _CURRENT_PROVIDER，stream 出来
+
+    当前默认是 BashListProvider（mock），等 DeepSeekProvider 接入后可切换。
+    """
     try:
         body = await request.json()
     except Exception:
@@ -71,77 +84,52 @@ async def chat_completions(request: Request):
             "error": {"message": "Invalid JSON", "type": "invalid_request_error"},
         })
 
-    # 提取用户消息摘要
-    msgs = body.get("messages", [])
-    user_preview = ""
-    is_tool_result = False
-    for msg in reversed(msgs):
-        if msg.get("role") == "user":
-            c = msg.get("content", "")
-            if isinstance(c, list):
-                texts = []
-                for b in c:
-                    if isinstance(b, dict):
-                        if b.get("type") == "text":
-                            texts.append(b.get("text", ""))
-                        elif b.get("type") == "tool_result":
-                            is_tool_result = True
-                user_preview = " ".join(texts)[:200]
-            else:
-                user_preview = str(c)[:200]
-            break
+    is_stream = bool(body.get("stream", True))
+    request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
-    if is_tool_result:
-        # 工具结果回传，自动放行
-        return await handle_chat(request)
+    if is_stream:
+        async def gen():
+            async for sse in stream_chat_to_sse(_CURRENT_PROVIDER, body, request_id=request_id):
+                yield sse
+        return StreamingResponse(
+            gen(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+        )
     else:
-        # === 违规请求拦截（走可配置规则引擎）===
-        try:
-            clean_prompt_check = gateway.extract_clean_user_prompt(body)
-        except Exception:
-            clean_prompt_check = ""
-        try:
-            blocked, matched_rule = rules.is_blocked(body, clean_prompt_check)
-        except Exception:
-            blocked, matched_rule = False, None
+        # 非流式：收集 SSE → 拼成 JSON
+        full_content = ""
+        tool_calls = []
+        finish_reason = "stop"
+        async for sse in stream_chat_to_sse(_CURRENT_PROVIDER, body, request_id=request_id):
+            line = sse.strip()
+            if not line.startswith("data: ") or line == "data: [DONE]":
+                continue
+            try:
+                chunk = json.loads(line[6:])
+            except Exception:
+                continue
+            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            if "content" in delta and delta["content"]:
+                full_content += delta["content"]
+            if "tool_calls" in delta:
+                for tc in delta["tool_calls"]:
+                    if "id" in tc:
+                        tool_calls.append({"id": tc["id"], "type": "function", "function": tc.get("function", {})})
+            if chunk.get("choices", [{}])[0].get("finish_reason"):
+                finish_reason = chunk["choices"][0]["finish_reason"]
 
-        if blocked:
-            rule_name = matched_rule.get("name", "?") if matched_rule else "?"
-            rule_id = matched_rule.get("id", "?") if matched_rule else "?"
-            print(f"[Rules] 拦截请求（命中规则 {rule_id} · {rule_name}）")
-            # 返回一个空的 OpenAI 格式响应，让 Claude Code 以为自己收到了正常回复
-            # 不计入 token、不发给 DeepSeek、不进 session 历史
-            model_name = body.get("model", "deepseek-v4-flash")
-            is_stream = bool(body.get("stream", True))
-            mock_req_id = f"chatcmpl-skip-{uuid.uuid4().hex[:12]}"
-
-            if is_stream:
-                async def skip_stream():
-                    created_ts = int(time.time())
-                    yield f"data: {json.dumps({'id': mock_req_id, 'object': 'chat.completion.chunk', 'created': created_ts, 'model': model_name, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': ''}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n"
-                    yield f"data: {json.dumps({'id': mock_req_id, 'object': 'chat.completion.chunk', 'created': created_ts, 'model': model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]}, ensure_ascii=False)}\n\n"
-                    yield "data: [DONE]\n\n"
-                return StreamingResponse(
-                    skip_stream(),
-                    media_type="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-                )
-            else:
-                return JSONResponse(content={
-                    "id": mock_req_id,
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": model_name,
-                    "choices": [{
-                        "index": 0,
-                        "message": {"role": "assistant", "content": ""},
-                        "finish_reason": "stop",
-                    }],
-                    "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-                })
-
-        # ✅ 正常请求：直通（暂不审批）
-        return await handle_chat(request)
+        message = {"role": "assistant", "content": full_content or ("" if tool_calls else "")}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return JSONResponse(content={
+            "id": request_id,
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": body.get("model", "deepseek-v4-flash"),
+            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        })
 
 
 @app.get("/v1/models")
@@ -529,6 +517,21 @@ async def login(request: Request):
         return {"ok": True, "message": "Login successful, session created"}
     else:
         return JSONResponse(status_code=401, content={"ok": False, "error": "Login failed. Check console for details."})
+
+
+# ── v2 架构：新 react_loop + Provider ───────────────────────
+
+
+# 当前使用的 provider（启动时由环境变量决定）
+# DEEPSEEK_PROVIDER=true → 用真实 DeepSeek，否则用 BashListProvider（mock）
+import os as _os
+if _os.environ.get("DEEPSEEK_PROVIDER", "").lower() in ("1", "true", "yes"):
+    from providers.deepseek import DeepSeekProvider
+    _CURRENT_PROVIDER = DeepSeekProvider()
+    print(f"[Provider] DeepSeekProvider (真实 API)")
+else:
+    _CURRENT_PROVIDER = BashListProvider()
+    print(f"[Provider] BashListProvider (mock, DEEPSEEK_PROVIDER=true 切换到真实 API)")
 
 
 # ── 启动 ──────────────────────────────────────────────

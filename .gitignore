@@ -31,3 +31,23 @@ _debug_*.py
 _dump_*.py
 *.disabled.py
 _last_raw_sse.txt
+
+# ── Python 虚拟环境 / 包 ──
+venv/
+.venv/
+env/
+*.egg-info/
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── 备份文件 ──
+*.bak
+main.py.bak

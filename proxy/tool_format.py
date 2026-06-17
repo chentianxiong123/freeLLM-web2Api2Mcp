@@ -15,21 +15,26 @@ DeepSeek 用 "自然语言暗语" 输出工具调用：
 依赖：调用方传入工具 schema（用于类型推断）
 """
 
+import os
 import re
 from typing import Any
 
 # 工具块匹配
-# 匹配 "工具 名称" 到 "工具结束" 中间的所有 key="value" 行
+# 匹配 "工具 名称" 到 "工具结束" 中间的所有 key=value 行（兼容带/不带引号、内嵌转义）
 TOOL_BLOCK_RE = re.compile(
     r'^\s*工具\s+([A-Za-z_]\w*)\s*$'           # 工具名行
-    r'((?:\n\s*[A-Za-z_]\w*\s*=\s*"[^"]*"\s*)*)'  # key="value" 行
+    r'((?:\n\s*[A-Za-z_]\w*\s*=\s*(?:"(?:\\.|[^"\\])*"|\S+)\s*)*)'  # key=value 行
     r'\n?\s*工具结束\s*$',
     re.MULTILINE,
 )
 
-# 单个 key="value" 行
+# 单个 key="value" 行（兼容：带引号 / 不带引号 / 引号内嵌转义）
+#   - key="value"           标准
+#   - key="val\"ue"         value 里嵌转义引号
+#   - key=10000             数字无引号
+#   - key=value             简单无空格无引号
 KEY_VALUE_RE = re.compile(
-    r'^\s*([A-Za-z_]\w*)\s*=\s*"((?:\\.|[^"\\])*)"\s*$',
+    r'^\s*([A-Za-z_]\w*)\s*=\s*(?:"((?:\\.|[^"\\])*)"|(\S+))\s*$',
     re.MULTILINE,
 )
 
@@ -37,6 +42,44 @@ KEY_VALUE_RE = re.compile(
 def _unescape(s: str) -> str:
     """还原字符串里的转义。"""
     return s.replace('\\"', '"').replace('\\\\', '\\').replace('\\n', '\n').replace('\\t', '\t')
+
+
+def _expand_tilde(args: dict) -> dict:
+    """把参数值里的 ~/X 或 ~ 展开成绝对路径。
+
+    DeepSeek 经常写 `~/Desktop` 这种 Unix 风格路径，但 Claude Code（尤其 Windows 上）
+    跑 Bash 时 `~` 不展开 → 命令返回空 → DeepSeek 误判超时 → 无限循环。
+
+    在工具块解析阶段直接展开，DeepSeek 完全无感。
+
+    规则：
+    - ~/X  →  {user_home}/X
+    - ~    →  {user_home}
+    - 已经绝对路径（盘符 C:/ 或 /）的，不动
+    - 非字符串值（数字、布尔），不动
+    """
+    if not isinstance(args, dict):
+        return args
+    home = None
+    for v in args.values():
+        if isinstance(v, str) and ("~/" in v or v.startswith("~")):
+            if home is None:
+                home = os.path.expanduser("~")
+            break
+    if home is None:
+        return args
+    out = {}
+    for k, v in args.items():
+        if isinstance(v, str):
+            if v == "~":
+                out[k] = home
+            elif v.startswith("~/"):
+                out[k] = home + v[1:]  # 保留开头的 /
+            else:
+                out[k] = v
+        else:
+            out[k] = v
+    return out
 
 
 def _infer_type(value: str, schema_type: str | None) -> Any:
@@ -97,7 +140,8 @@ def parse_tool_blocks(text: str, tools_schema: list[dict] | None = None) -> tupl
         kv_text = m.group(2)
         raw_args: dict[str, str] = {}
         for km in KEY_VALUE_RE.finditer(kv_text):
-            raw_args[km.group(1)] = km.group(2)
+            # group(2) = 带引号的值（支持内嵌转义），group(3) = 不带引号的值
+            raw_args[km.group(1)] = km.group(2) if km.group(2) is not None else km.group(3)
 
         # 找对应 schema
         schema = None
@@ -109,7 +153,7 @@ def parse_tool_blocks(text: str, tools_schema: list[dict] | None = None) -> tupl
 
         blocks.append({
             "name": name,
-            "arguments": _coerce_arguments(raw_args, schema),
+            "arguments": _expand_tilde(_coerce_arguments(raw_args, schema)),
         })
 
     # 剩余文本：把所有工具块 + 前后紧邻空行去掉

@@ -323,9 +323,14 @@ def extract_clean_user_prompt(data: dict) -> str:
             # 不应该转发给 DeepSeek —— 它是 Claude 的内部 housekeeping）
             r"\[SUGGESTION MODE:.*?\]",
             r"\[SUGGESTION-MODE:.*?\]",
+            # Claude Code 自动注入的"写个标题"等任务指令
+            # —— 只剥后面的 "Write the title..." 部分，
+            # <session>...</session> 里包的是用户真话，要保留
+            r"Write the title in the language.*?regardless of the language of the examples above\.\s*",
+            r"Write the title.*?the examples above\.\s*",
         ]
         for pat in patterns:
-            text = re.sub(pat, "", text, flags=re.DOTALL)
+            text = re.sub(pat, "", text, flags=re.DOTALL | re.IGNORECASE)
         # 清理多余空行，保留用户可能的换行意图
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         return text
@@ -373,6 +378,9 @@ def is_claude_housekeeping_request(data: dict) -> bool:
         "your job is to predict",
         "first: look at the user's recent messages",
         "the test: would they think",
+        # Claude Code 自动注入的"标题生成"指令（偷偷发的 housekeeping）
+        "write the title in the language",
+        "regardless of the language of the examples above",
     ]
     pl = prompt.lower()
     if any(kw in pl for kw in housekeeping_keywords):
@@ -384,6 +392,10 @@ def is_claude_housekeeping_request(data: dict) -> bool:
         "suggestion mode:",
         "predict what they would type",
         "stay silent if the next step isn't obvious",
+        # 标题生成 / 摘要生成 等 Claude Code 自动 housekeeping
+        "write the title in the language",
+        "write a title for",
+        "regardless of the language of the examples above",
     ]
     body_text = json.dumps(data, ensure_ascii=False).lower() if data else ""
     if any(m in body_text for m in housekeeping_markers):

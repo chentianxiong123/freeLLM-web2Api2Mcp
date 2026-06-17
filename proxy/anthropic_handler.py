@@ -45,80 +45,6 @@ def resolve_response_model(model_type: str) -> str:
     return DS_MODEL_TYPE_TO_OPENAI.get(model_type, "deepseek-v4-flash")
 
 
-def _build_conversation_history(body: dict) -> str:
-    """把 OpenAI messages[] 翻译成 DeepSeek 能理解的自然语言对话历史。
-
-    策略：
-    1. 跳过 Claude Code 的 system 消息（已经被剥了，不在这里）
-    2. 按顺序遍历 user / assistant / tool 三种角色
-    3. assistant 消息如果有 tool_calls，还原成 "我调用了 X(args)" 形式
-    4. tool 消息还原成 "工具 X 的执行结果：..." 形式
-    5. 最后一条 user 消息（如果含 system-reminder 等注入块）会被剥掉，只保留真文本
-    6. 全部拼成一段对话日志
-
-    返回：完整的对话历史 + 当前问题（最后一条 user），作为发 DeepSeek 的 user 消息
-    """
-    msgs = body.get("messages", []) or []
-    if not msgs:
-        return ""
-
-    lines: list[str] = []
-
-    for m in msgs:
-        role = m.get("role", "")
-        content = m.get("content", "")
-        tool_calls = m.get("tool_calls")
-
-        if role == "system":
-            continue  # 跳过 Claude Code 系统提示
-
-        if role == "user":
-            text = _extract_text_from_content(content)
-            if text:
-                lines.append(f"[用户]\n{text}")
-
-        elif role == "assistant":
-            text = _extract_text_from_content(content)
-            if text and not tool_calls:
-                lines.append(f"[助手]\n{text}")
-            if tool_calls:
-                # 还原成"我调用了 X"格式
-                for tc in tool_calls:
-                    fn = tc.get("function", {}) or {}
-                    name = fn.get("name", "?")
-                    args = fn.get("arguments", "{}")
-                    lines.append(f"[助手 调用工具] {name}\n参数：{args}")
-                if text:
-                    lines.append(f"[助手]\n{text}")
-
-        elif role == "tool":
-            # 工具结果回灌
-            text = _extract_text_from_content(content)
-            tool_call_id = m.get("tool_call_id", "")
-            # 找对应的工具名（向前回溯最近的 assistant tool_calls）
-            tc_name = _find_tool_name_for_id(msgs, m, tool_call_id)
-            label = f"[工具 {tc_name} 执行结果]" if tc_name else "[工具执行结果]"
-            if text:
-                # 截断超长输出
-                if len(text) > 4000:
-                    text = text[:2000] + "\n...（中间省略）...\n" + text[-1000:]
-                lines.append(f"{label}\n{text}")
-
-    return "\n\n".join(lines)
-
-
-def _find_tool_name_for_id(msgs: list, current_msg: dict, tool_call_id: str) -> str | None:
-    """从历史里找 tool_call_id 对应的工具名。"""
-    if not tool_call_id:
-        return None
-    for m in msgs:
-        if m.get("role") == "assistant" and m.get("tool_calls"):
-            for tc in m["tool_calls"]:
-                if tc.get("id") == tool_call_id:
-                    return (tc.get("function") or {}).get("name")
-    return None
-
-
 def _extract_text_from_content(content) -> str:
     """从 OpenAI content 字段提取纯文本（兼容 str / list / 含注入块的情况）。"""
     # 先走 gateway 的清洗逻辑，剥 Claude Code 注入块
@@ -151,7 +77,7 @@ def _build_tools_injection(tools: list[dict]) -> str:
     """
     if not tools:
         return ""
-    lines = ["\n\n[当前可用工具列表]"]
+    lines = ["\n你有以下工具可用（每次只能调用一个，发完等结果）："]
     for t in tools:
         fn = t.get("function", {})
         name = fn.get("name", "?")
@@ -168,6 +94,11 @@ def _build_tools_injection(tools: list[dict]) -> str:
                 lines.append(f"  必填：{', '.join(req)}")
             if opt:
                 lines.append(f"  可选：{', '.join(opt)}")
+    lines.append("\n\n调用格式：")
+    lines.append("工具 名称")
+    lines.append('参数名="参数值"')
+    lines.append("工具结束")
+    lines.append("\n\n重要：路径必须用绝对路径（如 C:/Users/a1/Desktop），不要用 ~/Desktop 这种 Unix 简写——Windows 上不展开。")
     return "\n".join(lines)
 
 
@@ -257,28 +188,40 @@ async def stream_response(
 ):
     """DeepSeek 流 → OpenAI SSE 流。
 
-    输出顺序：
-    1. role delta
-    2. content 增量（如果 DeepSeek 返回的是纯文本）
-    3. 末段：tool_calls delta（如果含工具块）+ usage + finish_reason
+    关键策略（react 循环正确性）：
+    - content 部分**先全部缓存**，不流给 Claude Code
+    - 等 DeepSeek 流完（type=done），解析"工具块"
+    - 解析出 tool 块 → content 发空，**只**流 role + tool_calls + finish
+    - 没 tool 块 → 流剩余纯文本（remaining_text）
+
+    为什么之前错：旧版边流边发，DeepSeek 写的"好的，我先看看"+"工具 X"+"工具结束"全部
+    当 content 流给 Claude Code。Claude Code 看到的是 "content=分析文字+工具块原文"+"tool_calls"，
+    content 里复述了工具块，污染 react 循环。
     """
     role_sent = False
     stop_reason = None
     total_tokens: int | None = None
     completion_chars: list[str] = []
-    full_content_parts: list[str] = []  # 完整 content（解析 tool 块前要用）
+    full_content_parts: list[str] = []
+
+    def _ensure_role():
+        nonlocal role_sent
+        if not role_sent:
+            role_sent = True
+            return _chat_chunk(request_id, model, {"role": "assistant", "content": ""})
+        return None
 
     for etype, val in ds_stream:
         if etype == "thinking":
+            # DeepSeek 在思考时不算 content，但仍先发 role（让 Claude Code 知道有回复）
+            yield _ensure_role()
             continue
         elif etype == "content":
-            if not role_sent:
-                role_sent = True
-                yield _chat_chunk(request_id, model, {"role": "assistant", "content": ""})
+            yield _ensure_role()
             if isinstance(val, str):
                 completion_chars.append(val)
                 full_content_parts.append(val)
-            yield _chat_chunk(request_id, model, {"content": val})
+            # ⚠️ 关键：暂不流 content，等解析完工具块再决定流不流
         elif etype == "token_usage":
             if isinstance(val, (int, float)) and val:
                 total_tokens = int(val)
@@ -297,18 +240,18 @@ async def stream_response(
     full_content = "".join(full_content_parts)
     remaining_text, tool_calls = tool_format.parse_tool_blocks(full_content, tools_schema)
 
-    # 如果发现了 tool 块，且之前 content 里已经流过这些块的原文（因为我们按 token 流），
-    # 会让 Claude Code 看到"块里这些行既在 content 也在 tool_calls"。
-    # 简单粗暴的处理：如果有 tool 块，就不再流原本那些 content（只流 remaining_text）。
-    # 但这意味着我们已经 yield 的 content chunk 包含了工具块原始文本。
-    #
-    # 更优解：先流纯文本部分，末段再补一个 "content" delta 把工具块原文覆盖掉。
-    # 这里先采取简单策略：有 tool 块时，最后追加一个空 content delta 占位（不重发），
-    # 让 Claude Code 看到的是 content + tool_calls 共存，Claude Code 会优先用 tool_calls。
-    #
-    # 实际验证：OpenAI 客户端（Claude Code）会按出现顺序处理：先 content 后 tool_calls，
-    # 工具块的原文会作为 content 末尾，然后 tool_calls 出现。Claude Code 会按 OpenAI 协议
-    # 把 tool_calls 作为结构化输出处理，不会因为 content 含相同内容出错。
+    # ── 兜底：如果整轮 DeepSeek 一字未吐（极少见），现在补 role delta ──
+    if not role_sent:
+        yield _chat_chunk(request_id, model, {"role": "assistant", "content": ""})
+        role_sent = True
+
+    # ── 决定 content 流不流 ──
+    if not tool_calls:
+        # 没工具块 → 流剩余纯文本
+        if remaining_text:
+            for i in range(0, len(remaining_text), 100):
+                yield _chat_chunk(request_id, model, {"content": remaining_text[i:i+100]})
+    # 有工具块 → content 流空（避免污染）
 
     # ── 输出 tool_calls deltas（如果有）──
     if tool_calls:
@@ -362,20 +305,24 @@ async def handle_chat(request: Request):
             "error": {"message": "Not logged in", "type": "authentication_error"},
         })
 
-    # ── 多轮对话翻译：把 messages[] 翻成自然语言对话历史 ──
-    history = _build_conversation_history(body)
-    if not history:
+    # ── 只发当前这条 user 消息原文 ──
+    # DeepSeek session 持久，本来就记得住之前聊过什么。
+    # 不要再把 OpenAI 的对话历史翻译成自然语言再发一遍——会重复塞垃圾、触发风控。
+    msgs = body.get("messages", []) or []
+    current_text = ""
+    for m in reversed(msgs):
+        if m.get("role") == "user":
+            current_text = _extract_text_from_content(m.get("content", ""))
+            break
+    if not current_text:
         return JSONResponse(status_code=400, content={
             "error": {"message": "No user message", "type": "invalid_request_error"},
         })
 
-    # ── 工具注入：把 OpenAI tools 转成 DeepSeek 端的工具列表说明 ──
+    # 工具 schema 仅用于 type 推断，不注入 prompt
     tools = body.get("tools", []) or []
-    tools_injection = _build_tools_injection(tools)
-    if tools_injection:
-        history = history + tools_injection
 
-    ds_messages = [{"role": "user", "content": history}]
+    ds_messages = [{"role": "user", "content": current_text}]
 
     ds_stream = ds_api.chat_completion(
         cfg=cfg,
@@ -393,7 +340,7 @@ async def handle_chat(request: Request):
                 ds_stream,
                 request_id,
                 response_model,
-                prompt_text=history,
+                prompt_text=current_text,
                 tools_schema=tools,
             ),
             media_type="text/event-stream",
