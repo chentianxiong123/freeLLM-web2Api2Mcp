@@ -20,17 +20,13 @@ __pycache__/
 # ── DeepSeek 凭据（不要提交）──
 config.json
 sessions.json
+accounts.json
 _last_raw_sse.txt
 
 # ── WASM / 编译产物 ──
 *.wasm
 
-# ── 临时测试/调试脚本 ──
-_test_*.py
-_debug_*.py
-_dump_*.py
-*.disabled.py
-_last_raw_sse.txt
+
 
 # ── Python 虚拟环境 / 包 ──
 venv/
@@ -51,3 +47,6 @@ Thumbs.db
 # ── 备份文件 ──
 *.bak
 main.py.bak
+
+# ── 运行时日志 ──
+*.log

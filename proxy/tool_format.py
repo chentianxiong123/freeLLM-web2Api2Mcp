@@ -20,21 +20,22 @@ import re
 from typing import Any
 
 # 工具块匹配
-# 匹配 "工具 名称" 到 "工具结束" 中间的所有 key=value 行（兼容带/不带引号、内嵌转义）
+# 匹配 "工具 名称" 到 "工具结束" 中间的所有 key=value 行（兼容带/不带引号、内嵌转义、前导空白）
 TOOL_BLOCK_RE = re.compile(
-    r'^\s*工具\s+([A-Za-z_]\w*)\s*$'           # 工具名行
-    r'((?:\n\s*[A-Za-z_]\w*\s*=\s*(?:"(?:\\.|[^"\\])*"|\S+)\s*)*)'  # key=value 行
-    r'\n?\s*工具结束\s*$',
+    r'^[ \t]*工具[ \t]+([A-Za-z_]\w*)[ \t]*$'           # 工具名行（允许 tab/空格缩进）
+    r'((?:\n[ \t]*[A-Za-z_]\w*[ \t]*=[ \t]*(?:"(?:\\.|[^"\\])*"|\S+)[ \t]*)*)'  # key=value 行（允许缩进）
+    r'\n?[ \t]*工具结束[ \t]*$',                          # 工具结束行（允许缩进）
     re.MULTILINE,
 )
 
-# 单个 key="value" 行（兼容：带引号 / 不带引号 / 引号内嵌转义）
+# 单个 key="value" 行（兼容：带引号 / 不带引号 / 引号内嵌转义 / 前导空白）
 #   - key="value"           标准
 #   - key="val\"ue"         value 里嵌转义引号
 #   - key=10000             数字无引号
 #   - key=value             简单无空格无引号
+#   -   key="value"         带缩进
 KEY_VALUE_RE = re.compile(
-    r'^\s*([A-Za-z_]\w*)\s*=\s*(?:"((?:\\.|[^"\\])*)"|(\S+))\s*$',
+    r'^[ \t]*([A-Za-z_]\w*)[ \t]*=[ \t]*(?:"((?:\\.|[^"\\])*)"|(\S+))\s*$',
     re.MULTILINE,
 )
 

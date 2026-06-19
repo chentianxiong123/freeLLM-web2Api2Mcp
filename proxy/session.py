@@ -20,6 +20,7 @@
 
 import json
 import time
+import threading
 from pathlib import Path
 
 import config
@@ -28,45 +29,48 @@ import config
 TOKEN_THRESHOLD = 900_000
 
 SESSION_FILE = Path(__file__).parent / "sessions.json"
+_LOCK = threading.Lock()
 
 
 def _load() -> dict:
     """加载 sessions.json，缺字段自动补全。"""
-    if not SESSION_FILE.exists():
-        return {"active_session_id": "", "sessions": {}}
-    try:
-        raw = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {"active_session_id": "", "sessions": {}}
+    with _LOCK:
+        if not SESSION_FILE.exists():
+            return {"active_session_id": "", "sessions": {}}
+        try:
+            raw = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {"active_session_id": "", "sessions": {}}
 
-    # 兼容老结构：{"session": {...}} → {"active_session_id": ..., "sessions": {...}}
-    if "sessions" not in raw:
-        old = raw.get("session", {})
-        sid = old.get("session_id", "")
-        sessions = {}
-        if sid:
-            sessions[sid] = {
-                "label": old.get("model", "default"),
-                "last_message_id": old.get("last_message_id"),
-                "message_count": 0,
-                "created_at": old.get("created", time.time()),
-                "last_used_at": old.get("last_used", time.time()),
+        # 兼容老结构：{"session": {...}} → {"active_session_id": ..., "sessions": {...}}
+        if "sessions" not in raw:
+            old = raw.get("session", {})
+            sid = old.get("session_id", "")
+            sessions = {}
+            if sid:
+                sessions[sid] = {
+                    "label": old.get("model", "default"),
+                    "last_message_id": old.get("last_message_id"),
+                    "message_count": 0,
+                    "created_at": old.get("created", time.time()),
+                    "last_used_at": old.get("last_used", time.time()),
+                }
+            raw = {
+                "active_session_id": sid,
+                "sessions": sessions,
             }
-        raw = {
-            "active_session_id": sid,
-            "sessions": sessions,
-        }
-    else:
-        raw.setdefault("active_session_id", "")
-        raw.setdefault("sessions", {})
-    return raw
+        else:
+            raw.setdefault("active_session_id", "")
+            raw.setdefault("sessions", {})
+        return raw
 
 
 def _save(data: dict) -> None:
-    SESSION_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    with _LOCK:
+        SESSION_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
 
 # ── 旧 API 兼容（保留给其他模块用）─────────────────────────
@@ -222,6 +226,35 @@ def register_session(session_id: str, label: str = "") -> dict:
         }
     _save(db)
     return sessions[session_id]
+
+
+def delete_session(session_id: str) -> tuple[bool, str | None]:
+    """删除一个 session（不能删 active session）。
+
+    返回 (成功, 错误信息)。
+    """
+    db = _load()
+    if session_id not in db.get("sessions", {}):
+        return False, "session 不存在"
+    if session_id == db.get("active_session_id", ""):
+        return False, "不能删除当前活跃 session（请先切换到别的 session）"
+    db["sessions"].pop(session_id, None)
+    _save(db)
+    return True, None
+
+
+def set_specific_last_message_id(session_id: str, message_id: str | int | None) -> bool:
+    """给指定 session 设置 last_message_id（不限 active）。
+
+    message_id=None → 清空续接点（下次会创建新根消息）。
+    """
+    db = _load()
+    if session_id not in db.get("sessions", {}):
+        return False
+    db["sessions"][session_id]["last_message_id"] = message_id
+    db["sessions"][session_id]["last_used_at"] = time.time()
+    _save(db)
+    return True
 
 
 def increment_message_count(session_id: str | None = None) -> None:

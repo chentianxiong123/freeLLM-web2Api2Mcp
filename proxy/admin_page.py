@@ -1,9 +1,114 @@
 """管理控制台页面模板
 
-静态 HTML/CSS/JS，用 {STATUS_HTML} 等占位符接收动态数据。
-使用 .format() 替换，避免 f-string 的 {{}} 冲突问题。
+侧边栏导航布局，每个页面是一个独立的路由。
 """
 import json
+
+
+BASE_CSS = """\
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f0f2f5; color:#333; }
+
+.sidebar { position:fixed; left:0; top:0; bottom:0; width:200px; background:#1a1a2e; color:#e0e0e0; display:flex; flex-direction:column; z-index:100; }
+.sidebar-header { padding:16px; border-bottom:1px solid #2a2a3e; }
+.sidebar-header h1 { font-size:14px; color:#fff; margin-bottom:2px; }
+.sidebar-header .subtitle { font-size:10px; color:#888; }
+.sidebar-nav { flex:1; padding:8px 0; overflow-y:auto; }
+.nav-item { display:flex; align-items:center; gap:8px; padding:10px 16px; font-size:13px; color:#b0b0c0; text-decoration:none; transition:all .2s; cursor:pointer; border-left:3px solid transparent; }
+.nav-item:hover { background:rgba(255,255,255,.05); color:#fff; }
+.nav-item.active { background:rgba(255,255,255,.08); color:#1677ff; border-left-color:#1677ff; }
+.nav-item .icon { font-size:14px; width:20px; text-align:center; }
+.sidebar-footer { padding:12px 16px; border-top:1px solid #2a2a3e; font-size:10px; color:#666; }
+
+.main { margin-left:200px; min-height:100vh; }
+.main-header { background:#fff; padding:12px 20px; border-bottom:1px solid #e8e8e8; display:flex; align-items:center; gap:12px; }
+.main-header h2 { font-size:15px; }
+.main-header .right { margin-left:auto; font-size:11px; color:#999; }
+
+.content { padding:16px 20px; max-width:960px; margin:0 auto; }
+
+.card { background:#fff; border-radius:8px; padding:14px; margin-bottom:12px; box-shadow:0 1px 2px rgba(0,0,0,.05); }
+h2 { font-size:13px; color:#333; margin-bottom:8px; font-weight:600; }
+label { display:block; font-size:12px; font-weight:600; margin:8px 0 3px; }
+input, select, textarea { width:100%; padding:8px 10px; border:1px solid #d9d9d9; border-radius:5px; font-size:12px; font-family:inherit; }
+input:focus, select:focus, textarea:focus { outline:none; border-color:#1677ff; box-shadow:0 0 0 2px rgba(22,119,255,.1); }
+button { padding:6px 12px; border:none; border-radius:5px; font-size:12px; cursor:pointer; font-family:inherit; transition:opacity .15s; }
+button:hover { opacity:.8; }
+button:disabled { opacity:.5; cursor:not-allowed; }
+
+.btn-primary { background:#1677ff; color:#fff; }
+.btn-ghost { background:#f5f5f5; color:#666; border:1px solid #d9d9d9; }
+.btn-sm { padding:4px 8px; font-size:11px; }
+.btn-danger { background:#ff4d4f; color:#fff; }
+.btn-warn { background:#fa8c16; color:#fff; }
+
+.status-row { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid #f5f5f5; font-size:12px; }
+.status-row:last-child { border:none; }
+.status-row .lbl { color:#888; }
+.status-row .val { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
+.tag { display:inline-block; padding:2px 6px; border-radius:3px; font-size:10px; font-weight:500; }
+.tag-ok { background:#e6fffb; color:#006d75; }
+.tag-fail { background:#fff2f0; color:#a8071a; }
+.tag-warn { background:#fff7e6; color:#d46b08; }
+
+.toolbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+.toolbar h2 { margin:0; }
+.toolbar .actions { display:flex; gap:4px; }
+
+.item-card { border:1px solid #e8e8e8; border-radius:6px; margin-bottom:6px; background:#fafafa; overflow:hidden; }
+.item-head { display:flex; align-items:center; gap:8px; padding:8px 10px; }
+.item-info { flex:1; min-width:0; }
+.item-title { font-size:12px; color:#222; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-bottom:2px; }
+.item-meta { font-size:10px; color:#999; display:flex; flex-wrap:wrap; gap:4px; }
+.item-meta b { color:#666; font-weight:600; }
+.item-actions { display:flex; gap:4px; flex-shrink:0; }
+
+.empty { text-align:center; color:#ccc; padding:20px; font-size:12px; }
+
+.intercept-row { border:1px solid #e8e8e8; border-radius:6px; margin-bottom:6px; cursor:pointer; transition:background .15s; }
+.intercept-row:hover { background:#f5f5f5; }
+.intercept-head { display:flex; align-items:center; gap:8px; padding:8px 10px; font-size:12px; }
+.intercept-method { font-weight:600; color:#1677ff; min-width:40px; }
+.intercept-path { flex:1; color:#333; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; }
+.intercept-status { min-width:30px; text-align:right; }
+.intercept-status.ok { color:#389e0d; }
+.intercept-status.err { color:#cf1322; }
+.intercept-time { color:#999; font-size:10px; min-width:50px; text-align:right; }
+.intercept-detail { display:none; padding:10px; background:#fff; border-top:1px solid #e8e8e8; font-size:11px; }
+.intercept-detail.open { display:block; }
+.intercept-detail pre { background:#f5f5f5; padding:8px; border-radius:4px; overflow:auto; max-height:200px; font-size:11px; white-space:pre-wrap; word-break:break-all; margin-top:4px; }
+"""
+
+SHARED_JS = """\
+const $ = id => document.getElementById(id);
+
+function escapeHtml(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"\\']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+}
+
+function showToast(text, ok) {
+    var t = $('toast');
+    t.textContent = text;
+    t.style.background = ok ? '#f6ffed' : '#fff2f0';
+    t.style.color = ok ? '#389e0d' : '#cf1322';
+    t.style.border = '1px solid ' + (ok ? '#b7eb8f' : '#ffa39e');
+    t.style.display = 'block';
+    t.style.opacity = '1';
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.style.display = 'none', 300); }, 3000);
+}
+
+function closeModal() { $('modal').style.display = 'none'; }
+
+function openModalRaw(title, bodyHtml) {
+    $('modalTitle').textContent = title;
+    $('modalMeta').textContent = '';
+    $('modalBody').innerHTML = bodyHtml;
+    $('modalFoot').innerHTML = '<button class="btn-ghost" onclick="closeModal()">关闭</button>';
+    $('modal').style.display = 'flex';
+}
+"""
 
 
 def escape_json_js(s):
@@ -13,770 +118,955 @@ def escape_json_js(s):
     return json.dumps(s, ensure_ascii=False)[1:-1]
 
 
-def render_admin_html(cfg, usage):
-    """拼装管理控制台页面。"""
+def _sidebar(active_page):
+    """生成侧边栏 HTML"""
+    nav_items = [
+        ("/admin", "📊", "概览"),
+        ("/admin/accounts", "👤", "账号"),
+        ("/admin/sessions", "💬", "会话"),
+        ("/admin/rules", "🛡️", "规则"),
+        ("/admin/tools", "🎮", "工具"),
+        ("/admin/debug", "🔍", "调试"),
+    ]
+    links = ""
+    for href, icon, label in nav_items:
+        cls = " active" if href == active_page else ""
+        links += f'  <a class="nav-item{cls}" href="{href}"><span class="icon">{icon}</span> {label}</a>\n'
+
+    return f"""<div class="sidebar">
+  <div class="sidebar-header">
+    <h1>🔌 DeepSeek Proxy</h1>
+    <span class="subtitle">v0.3.0</span>
+  </div>
+  <nav class="sidebar-nav">
+{links}  </nav>
+  <div class="sidebar-footer">DeepSeek Web Agent</div>
+</div>"""
+
+
+MODAL_HTML = """\
+<div id="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;justify-content:center;align-items:center" onclick="if(event.target===this)closeModal()">
+<div style="background:#fff;border-radius:8px;width:90%;max-width:560px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 24px rgba(0,0,0,.2)">
+  <div style="padding:12px 16px;border-bottom:1px solid #f0f0f0;display:flex;justify-content:space-between;align-items:center">
+    <div><div id="modalTitle" style="font-size:14px;font-weight:600"></div><div id="modalMeta" style="font-size:10px;color:#999;margin-top:2px"></div></div>
+    <button onclick="closeModal()" style="background:none;border:none;font-size:16px;cursor:pointer;color:#999">&times;</button>
+  </div>
+  <div id="modalBody" style="padding:16px;overflow-y:auto;flex:1"></div>
+  <div id="modalFoot" style="padding:8px 16px;border-top:1px solid #f0f0f0;text-align:right"></div>
+</div>
+</div>"""
+
+TOAST_HTML = """<div id="toast" style="position:fixed;top:16px;right:16px;z-index:2000;display:none;padding:8px 14px;border-radius:6px;font-size:12px;box-shadow:0 4px 12px rgba(0,0,0,.15);transition:opacity .3s"></div>"""
+
+
+def _page_shell(title, sidebar_html, content_html, page_js=""):
+    """生成完整页面外壳"""
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{title} - DeepSeek Proxy 管理</title>
+<style>
+{BASE_CSS}</style>
+</head>
+<body>
+
+{sidebar_html}
+
+<div class="main">
+  <div class="main-header">
+    <h2>{title}</h2>
+  </div>
+  <div class="content">
+{content_html}
+  </div>
+</div>
+
+{MODAL_HTML}
+{TOAST_HTML}
+
+<script>
+{SHARED_JS}
+{page_js}
+</script>
+</body>
+</html>"""
+
+
+def render_overview(cfg, usage):
+    """概览页"""
     status_tag_class = 'tag-ok' if cfg.get('token') else 'tag-fail'
     status_text = '✅ 已登录' if cfg.get('token') else '❌ 未登录'
     token_display = (cfg.get('token', '')[:24] + '…') if cfg.get('token') else '空'
     sid_display = (cfg.get('session_id', '')[:24] + '…') if cfg.get('session_id') else '空'
     ptokens = usage.get('prompt_tokens', 0)
-    port = cfg.get('port', 8080)
+    port = cfg.get('port', 48391)
 
-    STATUS_HTML = f"""
-<div class="card">
-<h2>📊 状态</h2>
-<div class="status-item"><span class="label">登录状态</span><span class="tag {status_tag_class}">{status_text}</span></div>
-<div class="status-item"><span class="label">Token</span><span class="value">{token_display}</span></div>
-<div class="status-item"><span class="label">会话 ID</span><span class="value">{sid_display}</span></div>
-<div class="status-item"><span class="label">本 session 累计 token</span><span class="value">{ptokens}</span></div>
-<div class="status-item"><span class="label">监听端口</span><span class="value">{port}</span></div>
-</div>
-"""
+    # 获取账号信息
+    try:
+        from accounts import list_accounts, get_active_account
+        all_accs = list_accounts()
+        active_acc = get_active_account()
+        acc_count = len(all_accs)
+        logged_in_count = sum(1 for a in all_accs if a.get('token'))
+        active_label = active_acc.get('label', active_acc.get('id', '-')) if active_acc else '-'
+    except Exception:
+        acc_count = 0
+        logged_in_count = 0
+        active_label = '-'
 
-    # 核心：所有 HTML/CSS/JS 都在这里，用 {STATUS_HTML} 占位
-    HTML = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DeepSeek Proxy 管理</title>
-<style>
-* {{ margin:0; padding:0; box-sizing:border-box; }}
-body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f0f2f5; padding:20px; color:#333; }}
-.container {{ max-width:900px; margin:0 auto; }}
-.card {{ background:#fff; border-radius:12px; padding:20px; margin-bottom:16px; box-shadow:0 1px 3px rgba(0,0,0,.08); }}
-h1 {{ font-size:22px; margin-bottom:6px; }}
-.subtitle {{ font-size:13px; color:#888; margin-bottom:16px; }}
-h2 {{ font-size:15px; color:#333; margin-bottom:12px; font-weight:600; }}
-label {{ display:block; font-size:13px; font-weight:600; margin:10px 0 4px; }}
-input, select {{ width:100%; padding:10px; border:1px solid #ddd; border-radius:8px; font-size:14px; font-family:inherit; }}
-button {{ padding:8px 14px; border:none; border-radius:6px; font-size:13px; cursor:pointer; font-family:inherit; transition:opacity .15s; }}
-button:hover {{ opacity:.8; }}
-button:disabled {{ opacity:.5; cursor:not-allowed; }}
-.btn-primary {{ background:#1677ff; color:#fff; width:100%; padding:12px; font-size:15px; margin-top:12px; }}
-.btn-approve {{ background:#52c41a; color:#fff; }}
-.btn-reject {{ background:#ff4d4f; color:#fff; }}
-.btn-ghost {{ background:#f5f5f5; color:#666; border:1px solid #d9d9d9; }}
-.btn-toggle {{ background:#fff; color:#1677ff; border:1px solid #1677ff; padding:4px 10px; font-size:12px; }}
-.status-item {{ display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid #f0f0f0; font-size:14px; }}
-.status-item:last-child {{ border:none; }}
-.status-item .label {{ color:#666; }}
-.status-item .value {{ font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; }}
-.tag {{ padding:2px 8px; border-radius:4px; font-size:12px; font-weight:500; }}
-.tag-ok {{ background:#e6fffb; color:#006d75; }}
-.tag-fail {{ background:#fff2f0; color:#a8071a; }}
-.tag-warn {{ background:#fff7e6; color:#d46b08; }}
-.msg {{ margin-top:12px; padding:10px 12px; border-radius:8px; font-size:13px; }}
-.msg-ok {{ background:#f6ffed; color:#389e0d; border:1px solid #b7eb8f; }}
-.msg-err {{ background:#fff2f0; color:#cf1322; border:1px solid #ffa39e; }}
-.req-card {{ border:1px solid #e8e8e8; border-radius:10px; margin-bottom:10px; background:#fafafa; overflow:hidden; }}
-.req-head {{ display:flex; align-items:center; gap:12px; padding:12px 14px; }}
-.req-info {{ flex:1; min-width:0; }}
-.req-preview {{ font-size:13px; color:#222; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-bottom:4px; }}
-.req-preview:empty::before {{ content:'(空)'; color:#bbb; }}
-.req-meta {{ font-size:11px; color:#999; display:flex; flex-wrap:wrap; gap:8px; }}
-.req-meta b {{ color:#555; font-weight:600; }}
-.req-actions {{ display:flex; gap:6px; flex-shrink:0; }}
-.req-body {{ background:#fff; border-top:1px solid #e8e8e8; padding:14px; display:none; }}
-.req-body.open {{ display:block; }}
-.section {{ margin-bottom:14px; }}
-.section:last-child {{ margin-bottom:0; }}
-.section-title {{ font-size:12px; font-weight:600; color:#888; text-transform:uppercase; letter-spacing:.5px; margin-bottom:6px; display:flex; align-items:center; gap:8px; }}
-.section-title .badge {{ background:#f0f0f0; color:#555; padding:1px 6px; border-radius:3px; font-size:11px; font-weight:500; text-transform:none; letter-spacing:0; }}
-.sys-info {{ background:#fff7e6; border:1px solid #ffd591; border-radius:6px; padding:8px 10px; font-size:12px; color:#874d00; margin-bottom:8px; }}
-.sys-info b {{ color:#d46b08; }}
-.msg-block {{ border-left:3px solid #d9d9d9; padding:8px 10px; margin-bottom:6px; background:#fafafa; border-radius:0 6px 6px 0; }}
-.msg-block.user {{ border-left-color:#1677ff; }}
-.msg-block.assistant {{ border-left-color:#52c41a; }}
-.msg-block.tool {{ border-left-color:#fa8c16; }}
-.msg-block.system {{ border-left-color:#722ed1; }}
-.msg-head {{ font-size:11px; color:#888; margin-bottom:4px; display:flex; gap:6px; align-items:center; }}
-.msg-head .role {{ font-weight:600; color:#333; }}
-.msg-head .idx {{ background:#f0f0f0; padding:0 6px; border-radius:3px; font-size:10px; }}
-.msg-text {{ font-size:13px; line-height:1.6; white-space:pre-wrap; word-break:break-word; color:#222; }}
-.msg-text.empty {{ color:#bbb; font-style:italic; }}
-.tool-tag {{ display:inline-block; padding:1px 6px; border-radius:3px; font-size:11px; font-weight:600; margin-right:4px; }}
-.tool-tag.use {{ background:#fff7e6; color:#d46b08; }}
-.tool-tag.result {{ background:#e6f7ff; color:#0958d9; }}
-.tool-tag.thinking {{ background:#f9f0ff; color:#531dab; }}
-.tool-tag.text {{ background:#f6ffed; color:#389e0d; }}
-.code-box {{ background:#1e1e1e; color:#d4d4d4; padding:10px 12px; border-radius:6px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; line-height:1.55; max-height:300px; overflow:auto; white-space:pre-wrap; word-break:break-word; }}
-.code-box .dim {{ color:#888; }}
-.empty {{ text-align:center; color:#ccc; padding:30px; font-size:14px; }}
-.spinner {{ display:inline-block; width:12px; height:12px; border:2px solid #d9d9d9; border-top-color:#1677ff; border-radius:50%; animation:spin .8s linear infinite; margin-right:6px; vertical-align:middle; }}
-@keyframes spin {{ to {{ transform:rotate(360deg); }} }}
-.modal-mask {{ position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; z-index:1000; padding:20px; }}
-.modal-mask.open {{ display:flex; }}
-.modal {{ background:#fff; border-radius:12px; width:100%; max-width:860px; max-height:90vh; display:flex; flex-direction:column; box-shadow:0 10px 40px rgba(0,0,0,.2); }}
-.modal-head {{ padding:16px 20px; border-bottom:1px solid #eee; display:flex; justify-content:space-between; align-items:center; flex-shrink:0; }}
-.modal-head h3 {{ font-size:16px; font-weight:600; color:#222; }}
-.modal-head .meta {{ font-size:12px; color:#888; margin-top:2px; }}
-.modal-close {{ background:transparent; color:#888; font-size:22px; line-height:1; padding:4px 10px; }}
-.modal-body {{ padding:20px; overflow-y:auto; flex:1; }}
-.modal-foot {{ padding:12px 20px; border-top:1px solid #eee; display:flex; justify-content:flex-end; gap:8px; flex-shrink:0; }}
-.toolbar {{ display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }}
-.toolbar .left {{ font-size:13px; color:#666; }}
-.toolbar .right {{ display:flex; gap:8px; }}
-</style>
-</head>
-<body>
-<div class="container">
-<h1>🔌 DeepSeek Proxy</h1>
-<div class="subtitle">DeepSeek 网页端 → OpenAI Chat Completions 反向代理 · 管理员审批控制台</div>
-
-{STATUS_HTML}
-
-<div class="card">
-<div class="toolbar">
-<h2 style="margin:0">💬 会话列表 <span id="sessionCount" style="font-size:12px;color:#999;font-weight:400"></span></h2>
-<div class="right">
-<button class="btn-ghost" onclick="refreshSessions()">🔃 刷新</button>
-<button class="btn-primary" style="width:auto;padding:8px 14px;margin:0;font-size:13px" onclick="newSession()">➕ 新建会话</button>
-</div>
-</div>
-<div id="sessionList"><div class="empty">点击右上"刷新"加载</div></div>
+    content = f"""<div class="card">
+  <h2>📊 系统概览</h2>
+  <div class="status-row"><span class="lbl">登录状态</span><span class="val"><span class="tag {status_tag_class}">{status_text}</span></span></div>
+  <div class="status-row"><span class="lbl">Token</span><span class="val">{token_display}</span></div>
+  <div class="status-row"><span class="lbl">Session ID</span><span class="val">{sid_display}</span></div>
+  <div class="status-row"><span class="lbl">端口</span><span class="val">{port}</span></div>
+  <div class="status-row"><span class="lbl">累计 Prompt Tokens</span><span class="val">{ptokens}</span></div>
 </div>
 
 <div class="card">
-<div class="toolbar">
-<h2 style="margin:0">📥 待审批请求 <span id="pendingCount" style="font-size:12px;color:#999;font-weight:400"></span></h2>
-<div class="right">
-<button class="btn-ghost" onclick="refreshPending()">🔃 刷新列表</button>
-</div>
-</div>
-<div id="reqList"><div class="empty">点击右上"刷新列表"加载</div></div>
+  <h2>👤 账号状态</h2>
+  <div class="status-row"><span class="lbl">总账号数</span><span class="val">{acc_count}</span></div>
+  <div class="status-row"><span class="lbl">已登录</span><span class="val"><span class="tag {'tag-ok' if logged_in_count > 0 else 'tag-fail'}">{logged_in_count} / {acc_count}</span></span></div>
+  <div class="status-row"><span class="lbl">当前活跃</span><span class="val">{active_label}</span></div>
+  <div style="margin-top:8px"><a class="btn-ghost btn-sm" href="/admin/accounts" style="text-decoration:none">管理账号 →</a></div>
 </div>
 
-<div class="modal-mask" id="modal" onclick="if(event.target===this) closeModal()">
-  <div class="modal">
-    <div class="modal-head">
-      <div>
-        <h3 id="modalTitle">请求详情</h3>
-        <div class="meta" id="modalMeta"></div>
-      </div>
-      <button class="modal-close" onclick="closeModal()">&#x2715;</button>
-    </div>
-    <div class="modal-body" id="modalBody">
-      <div class="loading" style="text-align:center;color:#999;padding:30px;font-size:13px"><span class="spinner"></span>正在加载详情…</div>
-    </div>
-    <div class="modal-foot" id="modalFoot">
-      <button class="btn-ghost" onclick="closeModal()">关闭</button>
+<div class="card">
+  <h2>🔗 快捷操作</h2>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+    <a class="btn-ghost btn-sm" href="/admin/accounts" style="text-decoration:none">👤 账号管理</a>
+    <a class="btn-ghost btn-sm" href="/admin/sessions" style="text-decoration:none">💬 会话管理</a>
+    <a class="btn-ghost btn-sm" href="/admin/rules" style="text-decoration:none">🛡️ 规则管理</a>
+    <a class="btn-ghost btn-sm" href="/admin/tools" style="text-decoration:none">🎮 工具配置</a>
+    <a class="btn-ghost btn-sm" href="/admin/debug" style="text-decoration:none">🔍 调试拦截</a>
+  </div>
+</div>"""
+
+    sidebar = _sidebar("/admin")
+    return _page_shell("概览", sidebar, content)
+
+
+def render_accounts():
+    """账号管理页"""
+    content = """<div class="card">
+  <div class="toolbar">
+    <h2>👤 账号列表</h2>
+    <div class="actions">
+      <button class="btn-ghost btn-sm" onclick="refreshAccounts()">🔃 刷新</button>
+      <button class="btn-ghost btn-sm" onclick="importOldAccount()">📥 导入旧配置</button>
+      <button class="btn-primary btn-sm" onclick="openAddAccount()">➕ 添加并登录</button>
     </div>
   </div>
-</div>
+  <div id="accountList"><div class="empty">加载中...</div></div>
+</div>"""
 
-<div class="card">
-<div class="toolbar">
-<h2 style="margin:0">🛡️ 违规拦截规则 <span id="ruleCount" style="font-size:12px;color:#999;font-weight:400"></span></h2>
-<div class="right">
-<button class="btn-ghost" onclick="testRules()">🧪 测试</button>
-<button class="btn-ghost" onclick="resetRules()">↺ 重置默认</button>
-<button class="btn-ghost" onclick="refreshRules()">🔃 刷新</button>
-<button class="btn-primary" style="width:auto;padding:8px 14px;margin:0;font-size:13px" onclick="openRuleForm()">➕ 新增规则</button>
-</div>
-</div>
-<div id="ruleList"><div class="empty">点击右上"刷新"加载</div></div>
-</div>
+    js = """\
+async function refreshAccounts() {
+    try {
+        var r = await fetch('/api/accounts');
+        var d = await r.json();
+        var accs = d.accounts || [];
+        if (accs.length === 0) { $('accountList').innerHTML = '<div class="empty">暂无账号，点击"添加并登录"或"导入旧配置"</div>'; return; }
+        $('accountList').innerHTML = accs.map(a => renderAccountCard(a)).join('');
+    } catch(e) {
+        $('accountList').innerHTML = '<div class="empty">加载失败: ' + escapeHtml(e.message) + '</div>';
+    }
+}
 
-<div class="card">
-<div class="toolbar">
-<h2 style="margin:0">🎮 工具调用 <span id="toolConfigStatus" style="font-size:12px;color:#999;font-weight:400"></span></h2>
-<div class="right">
-<button class="btn-ghost" onclick="refreshToolConfig()">🔃 刷新</button>
-<button class="btn-primary" style="width:auto;padding:8px 14px;margin:0;font-size:13px" onclick="initTools()">📤 发送初始化消息</button>
-</div>
-</div>
-<div id="toolConfigCard">
-<div class="empty">点击刷新加载</div>
-</div>
-</div>
+function renderAccountCard(a) {
+    var active = a.active;
+    var hasToken = !!a.token;
+    var statusBadge = active
+        ? (hasToken ? '<span class="tag tag-ok">● 当前</span>' : '<span class="tag tag-warn">● 当前(未登录)</span>')
+        : (hasToken ? '<span class="tag tag-ok">● 已登录</span>' : '<span class="tag" style="background:#fff7e6;color:#fa8c16">● 未登录</span>');
+    var accDisplay = escapeHtml((a.account || '').slice(0, 25));
+    var lastUsed = a.last_used ? new Date(a.last_used * 1000).toLocaleString('zh-CN') : '-';
+    var switchBtn = active
+        ? ''
+        : '<button class="btn-primary btn-sm" onclick="activateAccount(\\'' + a.id + '\\')">切换</button>';
+    var loginBtn = hasToken
+        ? '<button class="btn-ghost btn-sm" onclick="loginAccount(\\'' + a.id + '\\')">刷新登录</button>'
+        : '<button class="btn-ghost btn-sm" style="color:#fa8c16;font-weight:600" onclick="loginAccount(\\'' + a.id + '\\')">⚠ 登录</button>';
+    var delBtn = active
+        ? ''
+        : '<button class="btn-danger btn-sm" onclick="deleteAccount(\\'' + a.id + '\\')">删</button>';
+    return '<div class="item-card" style="' + (active ? 'border-color:#52c41a;background:#f6ffed' : (hasToken ? '' : 'border-color:#fa8c16;background:#fffbe6')) + '">'
+        + '<div class="item-head"><div class="item-info">'
+        + '<div class="item-title">' + statusBadge + ' <b>' + escapeHtml(a.label || a.id) + '</b></div>'
+        + '<div class="item-meta"><b>类型:</b> ' + a.login_type + ' <b>账号:</b> ' + accDisplay
+        + (a.session_id ? ' <b>Session:</b> ' + escapeHtml(a.session_id.slice(0,8)) + '…' : '')
+        + ' <b>最后使用:</b> ' + lastUsed
+        + '</div></div><div class="item-actions">' + switchBtn + loginBtn + delBtn + '</div></div></div>';
+}
 
-<div class="card">
-<h2>📱 登录 DeepSeek</h2>
-<form id="loginForm">
-<label>登录方式</label>
-<select id="loginType"><option value="email">邮箱</option><option value="phone">手机号</option></select>
-<label>账号</label><input id="account" placeholder="邮箱或手机号">
-<label>密码</label><input id="password" type="password" placeholder="密码">
-<button class="btn-primary" id="loginBtn" onclick="doLogin()">登录</button>
-</form>
-<div id="loginMsg"></div>
-</div>
+function openAddAccount() {
+    var html = '<form id="addAccForm" onsubmit="return submitAddAccount(event)">'
+        + '<label>标签</label><input name="label" placeholder="主账号、测试号等" value="账号">'
+        + '<label>登录方式</label><select name="login_type"><option value="email">邮箱</option><option value="phone">手机号</option></select>'
+        + '<label>账号 *</label><input name="account" required placeholder="邮箱或手机号">'
+        + '<label>密码 *</label><input name="password" type="password" required>'
+        + '<div style="margin-top:8px;padding:8px;background:#f6ffed;border-radius:4px;font-size:12px;color:#52c41a">添加后会自动登录并保存 token</div>'
+        + '<div style="display:flex;gap:6px;margin-top:10px;justify-content:flex-end">'
+        + '<button type="button" class="btn-ghost" onclick="closeModal()">取消</button>'
+        + '<button type="submit" class="btn-primary btn-sm">添加并登录</button></div></form>';
+    openModalRaw('➕ 添加账号', html);
+}
 
-</div>
-
-<script>
-const $ = id => document.getElementById(id);
-
-function escapeHtml(s) {{
-    if (s == null) return '';
-    return String(s).replace(/[&<>"\\']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
-}}
-
-/* ── Session 管理 ────────────────────────────────── */
-
-async function refreshSessions() {{
-    const btn = document.querySelector('button[onclick="refreshSessions()"]');
-    if (btn) {{ btn.disabled = true; btn.textContent = '🔃 刷新中…'; }}
-    try {{
-        const r = await fetch('/api/sessions');
-        const d = await r.json();
-        const list = $('sessionList');
-        const ss = d.sessions || [];
-        $('sessionCount').textContent = ss.length ? ('(共 ' + escapeHtml(String(ss.length)) + ' 个)') : '';
-        if (ss.length === 0) {{
-            list.innerHTML = '<div class="empty">还没有 session，点右上"新建会话"创建</div>';
-            return;
-        }}
-        list.innerHTML = ss.map(s => renderSessionCard(s)).join('');
-    }} catch(e) {{
-        $('sessionList').innerHTML = '<div class="empty">刷新失败: ' + escapeHtml(e.message) + '</div>';
-    }} finally {{
-        if (btn) {{ btn.disabled = false; btn.textContent = '🔃 刷新'; }}
-    }}
-}}
-
-function renderSessionCard(s) {{
-    const isActive = s.active;
-    const activeBadge = isActive ? '<span class="tag tag-ok">🟢 当前活跃</span>' : '';
-    const lastMid = s.last_message_id ? 'parent_message_id=' + escapeHtml(String(s.last_message_id)) : '无（根消息）';
-    const lastUsed = s.last_used_at ? new Date(s.last_used_at * 1000).toLocaleString('zh-CN') : '-';
-    const created = s.created_at ? new Date(s.created_at * 1000).toLocaleString('zh-CN') : '-';
-    const label = s.label ? escapeHtml(s.label) + ' · ' : '';
-    const sidShort = s.session_id ? escapeHtml(s.session_id.slice(0, 8)) + '…' + escapeHtml(s.session_id.slice(-4)) : '-';
-    const switchBtn = isActive
-        ? '<button class="btn-toggle" disabled>已激活</button>'
-        : '<button class="btn-approve" onclick="activateSession(\\'' + escapeHtml(s.session_id) + '\\')">切换为此</button>';
-    return '<div class="req-card" style="' + (isActive ? 'border-color:#52c41a;background:#f6ffed' : '') + '">'
-        + '<div class="req-head">'
-        + '<div class="req-info">'
-        + '<div class="req-preview">' + label + escapeHtml(sidShort) + ' ' + activeBadge + '</div>'
-        + '<div class="req-meta">'
-        + '<b>消息数:</b> ' + (s.message_count || 0) + ' 条 <span>·</span> '
-        + '<b>累计 token:</b> ' + (s.prompt_tokens || 0) + ' <span>·</span> '
-        + '<b>续接:</b> ' + escapeHtml(lastMid) + ' <span>·</span> '
-        + '<b>创建:</b> ' + escapeHtml(created) + ' <span>·</span> '
-        + '<b>最后使用:</b> ' + escapeHtml(lastUsed)
-        + '</div>'
-        + '</div>'
-        + '<div class="req-actions">' + switchBtn + '</div>'
-        + '</div>'
-        + '</div>';
-}}
-
-async function newSession() {{
-    const label = prompt('给新会话起个名字（可选）', '');
-    if (label === null) return;
-    const btn = document.querySelector('button[onclick="newSession()"]');
-    if (btn) {{ btn.disabled = true; btn.textContent = '⏳ 创建中…'; }}
-    try {{
-        const r = await fetch('/api/sessions/new', {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{label: label}}),
-        }});
-        const d = await r.json();
-        if (d.ok) {{
-            showMsg('loginMsg', '✅ 新会话已创建并激活：' + escapeHtml(d.session_id.slice(0, 8)) + '…', true);
-            refreshSessions();
-        }} else {{
-            showMsg('loginMsg', '❌ ' + (d.error || '创建失败'), false);
-        }}
-    }} catch(e) {{
-        showMsg('loginMsg', '❌ ' + escapeHtml(e.message), false);
-    }} finally {{
-        if (btn) {{ btn.disabled = false; btn.textContent = '➕ 新建会话'; }}
-    }}
-}}
-
-async function activateSession(sid) {{
-    if (!confirm('切换到 session ' + escapeHtml(sid.slice(0, 8)) + '…？\\n\\n下次 Claude Code 发消息会走这个 session。')) return;
-    try {{
-        const r = await fetch('/api/sessions/activate', {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{session_id: sid}}),
-        }});
-        const d = await r.json();
-        if (d.ok) {{
-            showMsg('loginMsg', '✅ 已切换到 ' + escapeHtml(sid.slice(0, 8)) + '…', true);
-            refreshSessions();
-        }} else {{
-            showMsg('loginMsg', '❌ ' + (d.error || '切换失败'), false);
-        }}
-    }} catch(e) {{
-        showMsg('loginMsg', '❌ ' + escapeHtml(e.message), false);
-    }}
-}}
-
-/* ── 列表刷新（手动） ─────────────────────────────── */
-
-let _refreshing = false;
-
-async function refreshPending() {{
-    if (_refreshing) return;
-    _refreshing = true;
-    const btn = document.querySelector('button[onclick="refreshPending()"]');
-    if (btn) {{ btn.disabled = true; btn.textContent = '🔃 刷新中…'; }}
-    try {{
-        const r = await fetch('/api/pending');
-        const d = await r.json();
-        const list = $('reqList');
-        const reqs = d.requests || [];
-        $('pendingCount').textContent = reqs.length ? '(共 ' + reqs.length + ' 条等待)' : '';
-        if (reqs.length === 0) {{
-            list.innerHTML = '<div class="empty">暂无等待审批的请求</div>';
-            return;
-        }}
-        list.innerHTML = reqs.map(req => renderReqCard(req)).join('');
-    }} catch(e) {{
-        $('reqList').innerHTML = '<div class="empty">刷新失败: ' + escapeHtml(e.message) + '</div>';
-    }} finally {{
-        _refreshing = false;
-        if (btn) {{ btn.disabled = false; btn.textContent = '🔃 刷新列表'; }}
-    }}
-}}
-
-function renderReqCard(req) {{
-    const preview = req.latest_user || '';
-    const sysLen = req.system_prompt_len || 0;
-    const sysBadge = sysLen > 0
-        ? '<span class="tag tag-warn" title="Claude Code 系统提示词将被过滤，不发给 DeepSeek">🛡️ 系统提示词 ' + sysLen + ' 字符</span>'
-        : '';
-    const toolBadge = req.has_tool_results
-        ? '<span class="tag tag-ok">🔧 工具结果</span>'
-        : (req.has_tool_calls ? '<span class="tag tag-warn">🔧 含工具调用</span>' : '');
-    return '<div class="req-card" id="card-' + escapeHtml(req.id) + '">'
-        + '<div class="req-head">'
-        + '<div class="req-info">'
-        + '<div class="req-preview">' + escapeHtml(preview) + '</div>'
-        + '<div class="req-meta">'
-        + '<b>' + escapeHtml(req.id) + '</b> <span>模型: ' + escapeHtml(req.model || '-') + '</span> <span>用户: ' + req.user_count + ' 条</span> <span>助手: ' + req.assistant_count + ' 条</span> <span>等待: ' + (req.waiting || 0) + 's</span>'
-        + sysBadge + toolBadge
-        + '</div></div>'
-        + '<div class="req-actions">'
-        + '<button class="btn-toggle" onclick="openModal(\\'' + escapeHtml(req.id) + '\\')">查看详情</button>'
-        + '<button class="btn-approve" onclick="doApprove(\\'' + escapeHtml(req.id) + '\\')">放行</button>'
-        + '<button class="btn-reject" onclick="doReject(\\'' + escapeHtml(req.id) + '\\')">拒绝</button>'
-        + '</div></div></div>';
-}}
-
-/* ── 模态弹窗 ─────────────────────────────────────── */
-
-function openModal(reqId) {{
-    $('modalTitle').textContent = '请求详情 · ' + reqId;
-    $('modalMeta').textContent = '加载中…';
-    $('modalBody').innerHTML = '<div style="text-align:center;color:#999;padding:30px;font-size:13px"><span class="spinner"></span>正在加载详情…</div>';
-    $('modalFoot').innerHTML = '<button class="btn-ghost" onclick="closeModal()">关闭</button>';
-    $('modal').classList.add('open');
-    fetch('/api/request/' + reqId)
-        .then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
-        .then(d => {{
-            $('modalMeta').textContent = '模型: ' + (d.model || '-') + ' · 用户 ' + (d.user_messages||[]).length + ' 条 · 助手 ' + (d.assistant_messages||[]).length + ' 条 · 等待 ' + (d.waiting || 0) + 's';
-            $('modalBody').innerHTML = renderDetail(d);
-            $('modalFoot').innerHTML = '<button class="btn-ghost" onclick="closeModal()">关闭</button>'
-                + '<button class="btn-approve" onclick="doApprove(\\'' + reqId + '\\', true)">放行</button>'
-                + '<button class="btn-reject" onclick="doReject(\\'' + reqId + '\\', true)">拒绝</button>';
-        }})
-        .catch(e => {{
-            $('modalMeta').textContent = '加载失败';
-            $('modalBody').innerHTML = '<div class="msg msg-err">加载失败: ' + escapeHtml(e.message) + '</div>';
-        }});
-}}
-
-function closeModal() {{
-    $('modal').classList.remove('open');
-}}
-
-document.addEventListener('keydown', e => {{
-    if (e.key === 'Escape' && $('modal').classList.contains('open')) closeModal();
-}});
-
-/* ── 详情展开 ─────────────────────────────────────── */
-
-async function toggleDetail(reqId) {{
-    const body = $('body-' + reqId);
-    if (!body) return;
-    if (body.classList.contains('open')) {{
-        body.classList.remove('open');
-        return;
-    }}
-    body.classList.add('open');
-    body.innerHTML = '<div class="loading"><span class="spinner"></span>正在加载详情…</div>';
-    try {{
-        const r = await fetch('/api/request/' + reqId);
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        const d = await r.json();
-        body.innerHTML = renderDetail(d);
-    }} catch(e) {{
-        body.innerHTML = '<div class="msg msg-err">加载失败: ' + escapeHtml(e.message) + '</div>';
-    }}
-}}
-
-function renderDetail(d) {{
-    const sysLen = d.system_prompt_len || 0;
-    const userMsgs = d.user_messages || [];
-    const asstMsgs = d.assistant_messages || [];
-    const toolResults = d.tool_results || [];
-    const rawDisplay = d.request_data_display ? JSON.stringify(d.request_data_display, null, 2) : '';
-    const origSize = d.request_data_size || 0;
-    const sizeKB = origSize > 0 ? (origSize / 1024).toFixed(1) : '0';
-    const sizeNote = origSize > 0 ? sizeKB + ' KB · 已脱敏' : '完整 JSON';
-
-    let html = '<div class="section"><div class="section-title">🛡️ 系统提示词 <span class="badge">' + sysLen + ' 字符 · 已过滤</span></div>';
-    if (sysLen > 0) {{
-        html += '<div class="code-box">' + escapeHtml(d.system_prompt_preview || (d.system_prompt_full || '').slice(0, 500)) + '</div>';
-    }} else {{
-        html += '<div class="sys-info">无 system prompt</div>';
-    }}
-    html += '</div>';
-
-    html += '<div class="section"><div class="section-title">👤 用户消息 <span class="badge">' + userMsgs.length + ' 条</span></div>';
-    if (userMsgs.length === 0) {{
-        html += '<div class="empty">无用户消息</div>';
-    }} else {{
-        userMsgs.forEach(function(parts, i) {{
-            var text = parts.map(function(p) {{ return p[1] || ''; }}).join(' ');
-            html += '<div class="msg-block user"><div class="msg-head"><span class="role">user</span><span class="idx">#' + (i+1) + '</span></div>'
-                + '<div class="msg-text">' + escapeHtml(text || '(空)') + '</div></div>';
-        }});
-    }}
-    html += '</div>';
-
-    if (asstMsgs.length > 0) {{
-        html += '<div class="section"><div class="section-title">🤖 助手消息 <span class="badge">' + asstMsgs.length + ' 条</span></div>';
-        asstMsgs.forEach(function(parts, i) {{
-            var text = parts.map(function(p) {{ return p[1] || ''; }}).join(' ');
-            html += '<div class="msg-block assistant"><div class="msg-head"><span class="role">assistant</span><span class="idx">#' + (i+1) + '</span></div>'
-                + '<div class="msg-text">' + escapeHtml(text || '(空)') + '</div></div>';
-        }});
-        html += '</div>';
-    }}
-
-    if (toolResults.length > 0) {{
-        html += '<div class="section"><div class="section-title">🔧 工具结果 <span class="badge">' + toolResults.length + ' 条</span></div>';
-        toolResults.forEach(function(t, i) {{
-            html += '<div class="msg-block tool"><div class="msg-head"><span class="role">tool_result</span><span class="idx">#' + (i+1) + '</span></div>'
-                + '<div class="msg-text">' + escapeHtml(t.content || '') + '</div></div>';
-        }});
-        html += '</div>';
-    }}
-
-    html += '<div class="section"><div class="section-title">📦 原始请求体（脱敏版） ' + sizeNote + '</div>';
-    html += '<div class="code-box">' + escapeHtml(rawDisplay) + '</div></div>';
-
-    return html;
-}}
-
-/* ── 操作 ─────────────────────────────────────────── */
-
-async function doApprove(id, fromModal) {{
-    await fetch('/api/approve/' + id, {{method:'POST'}});
-    if (fromModal) closeModal();
-    refreshPending();
-}}
-async function doReject(id, fromModal) {{
-    await fetch('/api/reject/' + id, {{method:'POST'}});
-    if (fromModal) closeModal();
-    refreshPending();
-}}
-async function doLogin() {{
-    const btn = $('loginBtn');
-    btn.disabled = true; btn.textContent = '登录中...';
-    try {{
-        const r = await fetch('/login', {{
-            method:'POST',
-            headers:{{'Content-Type':'application/json'}},
-            body: JSON.stringify({{
-                login_type: $('loginType').value,
-                account: $('account').value,
-                password: $('password').value
-            }})
-        }});
-        const d = await r.json();
-        showMsg('loginMsg', d.ok ? '✅ '+d.message : '❌ '+(d.error || '登录失败'), d.ok);
-        if (d.ok) setTimeout(()=>location.reload(), 1000);
-    }} catch(e) {{ showMsg('loginMsg', '❌ '+escapeHtml(e.message), false); }}
-    finally {{ btn.disabled = false; btn.textContent = '登录'; }}
-}}
-function showMsg(id, text, ok) {{
-    const el = $(id);
-    el.textContent = text;
-    el.className = 'msg ' + (ok ? 'msg-ok' : 'msg-err');
-}}
-
-refreshSessions();
-
-/* ── 违规拦截规则 ─────────────────────────────── */
-
-async function refreshRules() {{
-    const btn = document.querySelector('button[onclick="refreshRules()"]');
-    if (btn) {{ btn.disabled = true; btn.textContent = '🔃 刷新中…'; }}
-    try {{
-        const r = await fetch('/api/rules');
-        const d = await r.json();
-        const list = $('ruleList');
-        const rs = d.rules || [];
-        $('ruleCount').textContent = rs.length ? '(共 ' + rs.length + ' 条 · ' + rs.filter(function(x){{return x.enabled;}}).length + ' 启用)' : '';
-        if (rs.length === 0) {{
-            list.innerHTML = '<div class="empty">还没有规则，点右上"新增规则"创建</div>';
-            return;
-        }}
-        list.innerHTML = rs.map(function(r){{return renderRuleCard(r);}}).join('');
-    }} catch(e) {{
-        $('ruleList').innerHTML = '<div class="empty">刷新失败: ' + escapeHtml(e.message) + '</div>';
-    }} finally {{
-        if (btn) {{ btn.disabled = false; btn.textContent = '🔃 刷新'; }}
-    }}
-}}
-
-function renderRuleCard(r) {{
-    var onOff = r.enabled
-        ? '<span class="tag tag-ok">✅ 启用</span>'
-        : '<span class="tag" style="background:#f5f5f5;color:#999">⏸ 停用</span>';
-    var typeLabel = r.type === 'keyword_substring' ? '关键词' : (r.type === 'regex' ? '正则' : (r.type === 'empty_clean_prompt' ? '空 prompt' : r.type));
-    var scopeLabel = r.scope === 'body' ? '全文' : (r.scope === 'clean_prompt' ? '清洗后 prompt' : (r.scope === 'user_text_blocks' ? '用户 text 块' : r.scope));
-    var patHtml = r.pattern ? '<code style="background:#f5f5f5;padding:1px 6px;border-radius:3px;font-size:12px">' + escapeHtml(r.pattern) + '</code>' : '<span style="color:#bbb">（无）</span>';
-    var note = r.note ? '<div style="font-size:12px;color:#888;margin-top:4px">' + escapeHtml(r.note) + '</div>' : '';
-    var toggleBtn = r.enabled
-        ? '<button class="btn-toggle" onclick="toggleRule(\\'' + escapeHtml(r.id) + '\\', false)">停用</button>'
-        : '<button class="btn-approve" onclick="toggleRule(\\'' + escapeHtml(r.id) + '\\", true)">启用</button>';
-    return '<div class="req-card" style="' + (r.enabled ? '' : 'opacity:.55') + '">'
-        + '<div class="req-head"><div class="req-info">'
-        + '<div class="req-preview">' + onOff + ' <b>' + escapeHtml(r.name) + '</b> <span style="color:#999;font-size:12px">' + escapeHtml(r.id) + '</span></div>'
-        + '<div class="req-meta"><b>类型:</b> ' + escapeHtml(typeLabel) + ' <span>·</span> <b>范围:</b> ' + escapeHtml(scopeLabel)
-        + (r.case_sensitive ? ' <span>·</span><b>区分大小写</b>' : '')
-        + ' <span>·</span> <b>pattern:</b> ' + patHtml + '</div>'
-        + note + '</div><div class="req-actions">' + toggleBtn
-        + '<button class="btn-toggle" onclick="openRuleForm(\\'' + escapeHtml(r.id) + '\\')">编辑</button>'
-        + '<button class="btn-reject" onclick="deleteRule(\\'' + escapeHtml(r.id) + '\\')">删</button>'
-        + '</div></div></div>';
-}}
-
-async function toggleRule(rid, enabled) {{
-    try {{
-        const r = await fetch('/api/rules/toggle/' + rid, {{
-            method: 'POST',
-            headers: {{'Content-Type':'application/json'}},
-            body: JSON.stringify({{enabled: enabled}}),
-        }});
-        const d = await r.json();
-        if (d.ok) refreshRules();
-        else alert('切换失败：' + (d.error || ''));
-    }} catch(e) {{ alert('切换失败：' + e.message); }}
-}}
-
-async function deleteRule(rid) {{
-    if (!confirm('确定要删除规则 ' + rid + ' 吗？')) return;
-    try {{
-        const r = await fetch('/api/rules/delete/' + rid, {{method:'POST'}});
-        const d = await r.json();
-        if (d.ok) refreshRules();
-        else alert('删除失败');
-    }} catch(e) {{ alert('删除失败：' + e.message); }}
-}}
-
-async function resetRules() {{
-    if (!confirm('确认重置为默认规则集？（已自定义的规则会丢失）')) return;
-    try {{
-        const r = await fetch('/api/rules/reset', {{method:'POST'}});
-        const d = await r.json();
-        if (d.ok) refreshRules();
-        else alert('重置失败');
-    }} catch(e) {{ alert('重置失败：' + e.message); }}
-}}
-
-function openRuleForm(rid) {{
-    var isEdit = !!rid;
-    var html = '<form id="ruleForm" onsubmit="return submitRuleForm(event,\\'' + (rid || '') + '\\')">'
-        + '<label>规则名称 *</label><input name="name" required placeholder="比如：SUGGESTION MODE">'
-        + '<label>类型 *</label><select name="type"><option value="keyword_substring">关键词子串（含则命中）</option><option value="regex">正则</option><option value="empty_clean_prompt">清洗后空 prompt（不需要 pattern）</option></select>'
-        + '<label>范围</label><select name="scope"><option value="body">全文 body JSON</option><option value="clean_prompt">清洗后 prompt（剥过注入块）</option><option value="user_text_blocks">所有 user 消息的 text 块拼接</option></select>'
-        + '<label>pattern（关键词或正则）</label><input name="pattern" placeholder="空 prompt 类型不用填">'
-        + '<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="case_sensitive" style="width:auto">区分大小写</label>'
-        + '<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="enabled" checked style="width:auto">启用</label>'
-        + '<label>备注</label><input name="note" placeholder="说明这条规则挡什么">'
-        + '<div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">'
-        + '<button type="button" class="btn-ghost" onclick="closeRuleForm()">取消</button>'
-        + '<button type="submit" class="btn-primary" style="width:auto;margin:0;padding:10px 20px">' + (isEdit ? '保存' : '创建') + '</button></div></form>';
-    openModalRaw(isEdit ? '编辑规则 · ' + rid : '新增规则', html, false);
-
-    if (isEdit) {{
-        fetch('/api/rules').then(function(r){{return r.json();}}).then(function(d){{
-            var target = (d.rules || []).find(function(x){{return x.id === rid;}});
-            if (!target) return;
-            var f = document.getElementById('ruleForm');
-            f.name.value = target.name || '';
-            f.type.value = target.type || 'keyword_substring';
-            f.scope.value = target.scope || 'body';
-            f.pattern.value = target.pattern || '';
-            f.case_sensitive.checked = !!target.case_sensitive;
-            f.enabled.checked = target.enabled !== false;
-            f.note.value = target.note || '';
-        }});
-    }}
-}}
-
-async function submitRuleForm(ev, rid) {{
+async function submitAddAccount(ev) {
     ev.preventDefault();
     var f = ev.target;
-    var body = {{
-        name: f.name.value.trim(),
-        type: f.type.value,
-        scope: f.scope.value,
-        pattern: f.pattern.value,
-        case_sensitive: f.case_sensitive.checked,
-        enabled: f.enabled.checked,
-        note: f.note.value.trim(),
-    }};
-    try {{
-        var r;
-        if (rid) {{
-            r = await fetch('/api/rules/update/' + rid, {{
-                method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(body),
-            }});
-        }} else {{
-            r = await fetch('/api/rules/add', {{
-                method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify(body),
-            }});
-        }}
+    var body = { label:f.label.value, login_type:f.login_type.value, account:f.account.value, password:f.password.value };
+    try {
+        var r = await fetch('/api/accounts/add', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
         var d = await r.json();
-        if (d.ok) {{
-            closeRuleForm();
-            refreshRules();
-        }} else {{
-            alert('失败：' + (d.error || ''));
-        }}
-    }} catch(e) {{ alert('失败：' + escapeHtml(e.message)); }}
+        if (d.ok) {
+            closeModal();
+            if (d.logged_in) { showToast('✅ 添加成功，已自动登录', true); }
+            else { showToast('⚠ 已添加但登录失败: ' + (d.message||''), false); }
+            refreshAccounts();
+        } else { showToast('❌ ' + (d.error||'失败'), false); }
+    } catch(e) { showToast('❌ ' + e.message, false); }
     return false;
-}}
+}
 
-function openModalRaw(title, bodyHtml, withFoot) {{
-    $('modalTitle').textContent = title;
-    $('modalMeta').textContent = '';
-    $('modalBody').innerHTML = bodyHtml;
-    $('modalFoot').innerHTML = withFoot
-        ? '<button class="btn-ghost" onclick="closeModal()">关闭</button>'
-        : '<button class="btn-ghost" onclick="closeRuleForm()">关闭</button>';
-    $('modal').classList.add('open');
-}}
+async function activateAccount(id) {
+    try {
+        var r = await fetch('/api/accounts/activate/' + id, {method:'POST'});
+        var d = await r.json();
+        if (d.ok) { showToast('✅ 已切换', true); refreshAccounts(); }
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
 
-function closeRuleForm() {{ closeModal(); refreshRules(); }}
+async function loginAccount(id) {
+    showToast('⏳ 登录中...', true);
+    try {
+        var r = await fetch('/api/accounts/login/' + id, {method:'POST'});
+        var d = await r.json();
+        if (d.ok) { showToast('✅ 登录成功', true); refreshAccounts(); }
+        else { showToast('❌ ' + (d.error||'失败'), false); }
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
 
-function testRules() {{
-    var html = '<div><label>输入要测试的 prompt</label>'
-        + '<textarea id="testPrompt" rows="6" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px" placeholder="比如：\\n[SUGGESTION MODE: Predict what the user might naturally type next]"></textarea>'
-        + '<div style="display:flex;gap:8px;margin-top:10px;justify-content:flex-end">'
+async function deleteAccount(id) {
+    if (!confirm('确定删除此账号？')) return;
+    try {
+        var r = await fetch('/api/accounts/delete/' + id, {method:'POST'});
+        var d = await r.json();
+        if (d.ok) { showToast('✅ 已删除', true); refreshAccounts(); }
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+
+async function importOldAccount() {
+    try {
+        var r = await fetch('/api/accounts/import', {method:'POST'});
+        var d = await r.json();
+        showToast(d.ok ? '✅ 已导入' : 'ℹ️ ' + d.message, d.ok);
+        refreshAccounts();
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+
+refreshAccounts();"""
+
+    sidebar = _sidebar("/admin/accounts")
+    return _page_shell("账号", sidebar, content, js)
+
+
+def render_sessions():
+    """会话管理页"""
+    content = """<div class="card">
+  <div class="toolbar">
+    <h2>💬 会话列表 <span id="sessionCount" style="font-size:10px;color:#999;font-weight:400"></span></h2>
+    <div class="actions">
+      <button class="btn-ghost btn-sm" onclick="refreshSessions()">🔃 刷新</button>
+      <button class="btn-ghost btn-sm" onclick="openImportSession()">📥 导入</button>
+      <button class="btn-primary btn-sm" onclick="newSession()">➕ 新建</button>
+    </div>
+  </div>
+  <div id="sessionList"><div class="empty">加载中...</div></div>
+</div>"""
+
+    js = """\
+async function refreshSessions() {
+    try {
+        var r = await fetch('/api/sessions');
+        var d = await r.json();
+        var ss = d.sessions || [];
+        $('sessionCount').textContent = ss.length ? '(' + ss.length + ')' : '';
+        if (ss.length === 0) { $('sessionList').innerHTML = '<div class="empty">暂无会话</div>'; return; }
+        $('sessionList').innerHTML = ss.map(s => renderSessionCard(s)).join('');
+    } catch(e) { $('sessionList').innerHTML = '<div class="empty">加载失败</div>'; }
+}
+
+function renderSessionCard(s) {
+    var active = s.active;
+    var badge = active ? '<span class="tag tag-ok">当前</span>' : '';
+    var mid = s.last_message_id ? 'mid=' + s.last_message_id : '根消息';
+    var lastUsed = s.last_used_at ? new Date(s.last_used_at * 1000).toLocaleString('zh-CN') : '-';
+    var label = s.label ? escapeHtml(s.label) + ' · ' : '';
+    var sid = s.session_id || '';
+    var sidShort = sid ? escapeHtml(sid.slice(0, 8)) + '…' : '-';
+    var switchBtn = active ? '' : '<button class="btn-primary btn-sm" onclick="activateSession(\\'' + escapeHtml(sid) + '\\')">切换</button>';
+    var delBtn = active ? '' : '<button class="btn-danger btn-sm" onclick="deleteSession(\\'' + escapeHtml(sid) + '\\')">删</button>';
+    return '<div class="item-card" style="' + (active ? 'border-color:#52c41a;background:#f6ffed' : '') + '">'
+        + '<div class="item-head"><div class="item-info">'
+        + '<div class="item-title">' + label + escapeHtml(sidShort) + ' ' + badge + '</div>'
+        + '<div class="item-meta"><b>消息:</b> ' + (s.message_count || 0) + ' <b>token:</b> ' + (s.prompt_tokens || 0) + ' <b>续接:</b> ' + mid + ' <b>使用:</b> ' + lastUsed
+        + '</div></div><div class="item-actions">' + switchBtn + delBtn + '</div></div></div>';
+}
+
+async function newSession() {
+    var label = prompt('会话名称（可选）', '');
+    if (label === null) return;
+    try {
+        var r = await fetch('/api/sessions/new', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({label:label}) });
+        var d = await r.json();
+        if (d.ok) { showToast('✅ 已创建', true); refreshSessions(); }
+        else { showToast('❌ ' + (d.error||'失败'), false); }
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+
+async function activateSession(sid) {
+    try {
+        var r = await fetch('/api/sessions/activate', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({session_id:sid}) });
+        var d = await r.json();
+        if (d.ok) { showToast('✅ 已切换', true); refreshSessions(); }
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+
+async function deleteSession(sid) {
+    if (!confirm('确定删除？')) return;
+    try {
+        var r = await fetch('/api/sessions/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({session_id:sid}) });
+        var d = await r.json();
+        if (d.ok) { showToast('✅ 已删除', true); refreshSessions(); }
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+
+function openImportSession() {
+    var html = '<form id="importForm" onsubmit="return submitImportForm(event)">'
+        + '<label>Session ID *</label><input name="session_id" required placeholder="UUID">'
+        + '<label>续接 message_id</label><input name="last_message_id" type="number" placeholder="留空=新根消息">'
+        + '<label>Label</label><input name="label" placeholder="可选">'
+        + '<label style="display:flex;align-items:center;gap:6px;margin-top:8px"><input type="checkbox" name="activate" style="width:auto">导入后激活</label>'
+        + '<div style="display:flex;gap:6px;margin-top:10px;justify-content:flex-end">'
+        + '<button type="button" class="btn-ghost" onclick="closeModal()">取消</button>'
+        + '<button type="submit" class="btn-primary btn-sm">导入</button></div></form>';
+    openModalRaw('📥 导入 Session', html);
+}
+
+async function submitImportForm(ev) {
+    ev.preventDefault();
+    var f = ev.target;
+    var raw = f.last_message_id.value.trim();
+    var body = { session_id:f.session_id.value.trim(), label:f.label.value.trim(), activate:f.activate.checked, last_message_id:raw===''?null:parseInt(raw,10) };
+    try {
+        var r = await fetch('/api/sessions/import', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+        var d = await r.json();
+        if (d.ok) { closeModal(); showToast('✅ 已导入', true); refreshSessions(); }
+        else { alert('失败：' + (d.error || '')); }
+    } catch(e) { alert('失败：' + e.message); }
+    return false;
+}
+
+refreshSessions();"""
+
+    sidebar = _sidebar("/admin/sessions")
+    return _page_shell("会话", sidebar, content, js)
+
+
+def render_rules():
+    """规则管理页"""
+    content = """<div class="card">
+  <div class="toolbar">
+    <h2>🛡️ 拦截规则 <span id="ruleCount" style="font-size:10px;color:#999;font-weight:400"></span></h2>
+    <div class="actions">
+      <button class="btn-ghost btn-sm" onclick="testRules()">🧪 测试</button>
+      <button class="btn-ghost btn-sm" onclick="resetRules()">↺ 重置</button>
+      <button class="btn-ghost btn-sm" onclick="refreshRules()">🔃 刷新</button>
+      <button class="btn-primary btn-sm" onclick="openRuleForm()">➕ 新增</button>
+    </div>
+  </div>
+  <div id="ruleList"><div class="empty">加载中...</div></div>
+</div>"""
+
+    js = """\
+async function refreshRules() {
+    try {
+        var r = await fetch('/api/rules');
+        var d = await r.json();
+        var rs = d.rules || [];
+        $('ruleCount').textContent = rs.length ? '(' + rs.length + ')' : '';
+        if (rs.length === 0) { $('ruleList').innerHTML = '<div class="empty">暂无规则</div>'; return; }
+        $('ruleList').innerHTML = rs.map(r => renderRuleCard(r)).join('');
+    } catch(e) { $('ruleList').innerHTML = '<div class="empty">加载失败</div>'; }
+}
+
+function renderRuleCard(r) {
+    var badge = r.enabled ? '<span class="tag tag-ok">启用</span>' : '<span class="tag" style="background:#f5f5f5;color:#999">停用</span>';
+    var pat = r.pattern ? '<code style="background:#f5f5f5;padding:1px 4px;border-radius:3px;font-size:10px">' + escapeHtml(r.pattern) + '</code>' : '';
+    var toggleBtn = r.enabled
+        ? '<button class="btn-ghost btn-sm" onclick="toggleRule(\\'' + r.id + '\\',false)">停用</button>'
+        : '<button class="btn-primary btn-sm" onclick="toggleRule(\\'' + r.id + '\\',true)">启用</button>';
+    return '<div class="item-card" style="' + (r.enabled ? '' : 'opacity:.6') + '">'
+        + '<div class="item-head"><div class="item-info">'
+        + '<div class="item-title">' + badge + ' <b>' + escapeHtml(r.name) + '</b></div>'
+        + '<div class="item-meta">' + pat + (r.note ? ' · ' + escapeHtml(r.note) : '') + '</div>'
+        + '</div><div class="item-actions">' + toggleBtn
+        + '<button class="btn-ghost btn-sm" onclick="openRuleForm(\\'' + r.id + '\\')">编辑</button>'
+        + '<button class="btn-danger btn-sm" onclick="deleteRule(\\'' + r.id + '\\')">删</button>'
+        + '</div></div></div>';
+}
+
+async function toggleRule(rid, enabled) {
+    try { await fetch('/api/rules/toggle/' + rid, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled:enabled}) }); refreshRules(); } catch(e) {}
+}
+
+async function deleteRule(rid) {
+    if (!confirm('确定删除？')) return;
+    try { await fetch('/api/rules/delete/' + rid, {method:'POST'}); refreshRules(); } catch(e) {}
+}
+
+async function resetRules() {
+    if (!confirm('重置为默认规则？')) return;
+    try { await fetch('/api/rules/reset', {method:'POST'}); showToast('✅ 已重置', true); refreshRules(); } catch(e) {}
+}
+
+function openRuleForm(rid) {
+    var isEdit = !!rid;
+    var html = '<form id="ruleForm" onsubmit="return submitRuleForm(event,\\'' + (rid||'') + '\\')">'
+        + '<label>规则名称 *</label><input name="name" required placeholder="SUGGESTION MODE">'
+        + '<label>pattern</label><input name="pattern" required placeholder="suggestion mode">'
+        + '<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="enabled" checked style="width:auto">启用</label>'
+        + '<label>备注</label><input name="note">'
+        + '<div style="display:flex;gap:6px;margin-top:10px;justify-content:flex-end">'
+        + '<button type="button" class="btn-ghost" onclick="closeModal()">取消</button>'
+        + '<button type="submit" class="btn-primary btn-sm">' + (isEdit?'保存':'创建') + '</button></div></form>';
+    openModalRaw(isEdit ? '编辑规则' : '新增规则', html);
+    if (isEdit) {
+        fetch('/api/rules').then(r=>r.json()).then(d => {
+            var t = (d.rules||[]).find(x=>x.id===rid);
+            if (!t) return;
+            var f = $('ruleForm');
+            f.name.value = t.name||''; f.pattern.value = t.pattern||'';
+            f.enabled.checked = t.enabled!==false; f.note.value = t.note||'';
+        });
+    }
+}
+
+async function submitRuleForm(ev, rid) {
+    ev.preventDefault();
+    var f = ev.target;
+    var body = { name:f.name.value.trim(), pattern:f.pattern.value, enabled:f.enabled.checked, note:f.note.value.trim() };
+    try {
+        var url = rid ? '/api/rules/update/' + rid : '/api/rules/add';
+        var r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+        var d = await r.json();
+        if (d.ok) { closeModal(); refreshRules(); }
+    } catch(e) {}
+    return false;
+}
+
+function testRules() {
+    var html = '<div><label>输入测试内容</label>'
+        + '<textarea id="testPrompt" rows="4" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:11px"></textarea>'
+        + '<div style="display:flex;gap:6px;margin-top:8px;justify-content:flex-end">'
         + '<button class="btn-ghost" onclick="closeModal()">关闭</button>'
-        + '<button class="btn-primary" style="width:auto;margin:0;padding:8px 16px" onclick="runRuleTest()">运行测试</button></div>'
-        + '<div id="testResult" style="margin-top:14px"></div></div>';
-    openModalRaw('🧪 规则命中测试', html, false);
-}}
+        + '<button class="btn-primary btn-sm" onclick="runRuleTest()">测试</button></div>'
+        + '<div id="testResult" style="margin-top:8px"></div></div>';
+    openModalRaw('🧪 规则测试', html);
+}
 
-async function runRuleTest() {{
-    var prompt = $('testPrompt').value;
-    var r = await fetch('/api/rules/test', {{
-        method:'POST', headers:{{'Content-Type':'application/json'}},
-        body: JSON.stringify({{prompt: prompt}}),
-    }});
+async function runRuleTest() {
+    var r = await fetch('/api/rules/test', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({prompt:$('testPrompt').value}) });
     var d = await r.json();
     var out = $('testResult');
-    if (d.blocked) {{
-        var f = d.first_hit || {{}};
-        out.innerHTML = '<div class="msg msg-err" style="margin:0"><b>🚫 会被拦截</b>（命中规则 ' + escapeHtml(f.id || '?') + ' · ' + escapeHtml(f.name || '?') + '）</div>'
-            + '<div style="font-size:12px;color:#888;margin-top:6px">清洗后 prompt 长度 = ' + d.clean_prompt_len + ' · 预览：' + escapeHtml(d.clean_prompt_preview || '(空)') + '</div>'
-            + '<div style="margin-top:8px;font-size:12px;color:#666">共命中 ' + d.hits.length + ' 条规则：' + d.hits.map(function(h){{return h.id+'·'+h.name;}}).join('， ') + '</div>';
-    }} else {{
-        out.innerHTML = '<div class="msg msg-ok" style="margin:0"><b>✅ 不会被拦截</b></div>'
-            + '<div style="font-size:12px;color:#888;margin-top:6px">清洗后 prompt 长度 = ' + d.clean_prompt_len + ' · 预览：' + escapeHtml(d.clean_prompt_preview || '(空)') + '</div>';
-    }}
-}}
+    if (d.blocked) {
+        out.innerHTML = '<div style="padding:6px;background:#fff2f0;border-radius:4px;font-size:11px;color:#cf1322"><b>🚫 拦截</b> — ' + escapeHtml((d.first_hit||{}).name||'?') + '</div>';
+    } else {
+        out.innerHTML = '<div style="padding:6px;background:#f6ffed;border-radius:4px;font-size:11px;color:#389e0d"><b>✅ 通过</b></div>';
+    }
+}
 
-/* ── 工具调用配置 ────────────────────────────────── */
+refreshRules();"""
 
-async function refreshToolConfig() {{
-    var btn = document.querySelector('button[onclick="refreshToolConfig()"]');
-    if (btn) {{ btn.disabled = true; btn.textContent = '🔃 刷新中…'; }}
-    try {{
+    sidebar = _sidebar("/admin/rules")
+    return _page_shell("规则", sidebar, content, js)
+
+
+def render_tools():
+    """工具配置页"""
+    content = """<div class="card">
+  <div class="toolbar">
+    <h2>🎮 工具配置 <span id="toolConfigStatus" style="font-size:10px;color:#999;font-weight:400"></span></h2>
+    <div class="actions">
+      <button class="btn-ghost btn-sm" onclick="refreshToolConfig()">🔃 刷新</button>
+      <button class="btn-primary btn-sm" onclick="initTools()">📤 发送初始化</button>
+    </div>
+  </div>
+  <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
+    <label style="font-size:11px;font-weight:600">终端类型：</label>
+    <select id="terminalSelect" onchange="changeTerminal()" style="padding:4px 8px;border:1px solid #d9d9d9;border-radius:4px;font-size:11px">
+      <option value="powershell">PowerShell</option>
+      <option value="cmd">CMD</option>
+      <option value="bash">Bash (WSL/Linux)</option>
+    </select>
+    <span id="terminalHint" style="font-size:10px;color:#999"></span>
+  </div>
+  <div id="toolConfigCard"><div class="empty">加载中...</div></div>
+</div>
+
+<div class="card">
+  <h2>🔍 解析器流程</h2>
+  <div style="font-size:11px;color:#666;margin-bottom:8px">DeepSeek 返回自然语言格式，解析器用正则切出工具块，转成结构化 tool_calls</div>
+  <div id="parserFlow">
+    <div style="padding:10px;background:#f5f5f5;border-radius:6px;font-size:11px;line-height:1.8">
+      <div><b>1. DeepSeek 原始回复</b>（自然语言暗语）</div>
+      <pre style="margin:4px 0;padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;font-size:11px;white-space:pre-wrap">好的，我先看看。
+
+工具 Bash
+command="Get-ChildItem C:/Users"
+description="列出用户目录"
+工具结束</pre>
+
+      <div style="margin-top:8px"><b>2. 正则匹配</b>（tool_format.py）</div>
+      <div style="padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;margin:4px 0">
+        <div style="font-family:monospace;font-size:10px;color:#666">TOOL_BLOCK_RE = 工具名行 + key=value行 + 工具结束</div>
+        <div style="font-family:monospace;font-size:10px;color:#666;margin-top:4px">KEY_VALUE_RE = 匹配 key="value" 或 key=value</div>
+      </div>
+
+      <div style="margin-top:8px"><b>3. 解析结果</b>（结构化）</div>
+      <pre style="margin:4px 0;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:4px;font-size:11px">{
+  "name": "Bash",
+  "arguments": {
+    "command": "Get-ChildItem C:/Users",
+    "description": "列出用户目录"
+  }
+}</pre>
+
+      <div style="margin-top:8px"><b>4. 类型推断</b></div>
+      <div style="padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;margin:4px 0;font-size:10px;color:#666">
+        <div>• string → 保持字符串</div>
+        <div>• integer → int(value)</div>
+        <div>• number → float(value)</div>
+        <div>• boolean → true/false → True/False</div>
+        <div>• ~/路径 → 自动展开为绝对路径</div>
+      </div>
+
+      <div style="margin-top:8px"><b>5. 输出</b>（OpenAI tool_calls 格式）</div>
+      <pre style="margin:4px 0;padding:8px;background:#e6f7ff;border:1px solid #91d5ff;border-radius:4px;font-size:11px">{
+  "id": "call_xxx",
+  "type": "function",
+  "function": {
+    "name": "Bash",
+    "arguments": "{\\"command\\": \\"Get-ChildItem C:/Users\\"}"
+  }
+}</pre>
+    </div>
+  </div>
+</div>"""
+
+    js = """\
+var currentTerminal = 'powershell';
+
+async function refreshToolConfig() {
+    try {
+        // 获取终端类型
+        var tr = await fetch('/api/config/terminal');
+        var td = await tr.json();
+        currentTerminal = td.terminal || 'powershell';
+        $('terminalSelect').value = currentTerminal;
+        $('terminalHint').textContent = getTerminalHint(currentTerminal);
+
+        // 获取工具配置
         var r = await fetch('/api/tool-config');
         var d = await r.json();
-        var tools = d.tools || {{}};
+        var tools = d.tools || {};
         var template = d.template || '';
         var names = Object.keys(tools);
-        $('toolConfigStatus').textContent = '（' + names.length + ' 个工具）';
+        $('toolConfigStatus').textContent = '(' + names.length + ' 个工具)';
 
-        var toolHtml = '';
-        for (var idx = 0; idx < names.length; idx++) {{
-            var name = names[idx];
+        // 根据终端类型生成示例
+        var toolHtml = names.map(name => {
             var spec = tools[name];
-            var req = (spec.required || []).join(', ');
-            var optEntries = Object.entries(spec.optional || {{}});
-            var linesText = '';
-            if (optEntries.length > 0) {{
-                linesText = '<b>可选:</b><br>' + optEntries.map(function(kv){{return kv[0] + ': ' + kv[1];}}).join('<br>');
-            }}
-            toolHtml += '<div class="msg-block user" style="margin-top:8px">'
-                + '<div class="msg-head"><span class="role">' + escapeHtml(name) + '</span><span class="idx">' + escapeHtml(spec.description || '') + '</span></div>'
-                + '<div class="msg-text" style="font-size:12px"><b>必填:</b> ' + (escapeHtml(req) || '无') + '<br>' + linesText + '</div></div>';
-        }}
+            var req = (spec.required||[]).join(', ') || '无';
+            var opt = Object.keys(spec.optional||{}).join(', ') || '无';
+            var example = getToolExample(name, currentTerminal);
+            return '<div style="padding:8px;background:#fafafa;border-radius:4px;margin-bottom:6px;border-left:2px solid #1677ff">'
+                + '<div style="font-size:12px;font-weight:600;color:#1677ff">' + escapeHtml(name) + '</div>'
+                + '<div style="font-size:10px;color:#666;margin-top:4px">' + escapeHtml(spec.description||'') + '</div>'
+                + '<div style="font-size:10px;color:#888;margin-top:4px"><b>必填:</b> ' + escapeHtml(req) + ' · <b>可选:</b> ' + escapeHtml(opt) + '</div>'
+                + '<div style="margin-top:6px;padding:6px;background:#f5f5f5;border-radius:3px;font-family:monospace;font-size:10px;white-space:pre-wrap">' + escapeHtml(example) + '</div>'
+                + '</div>';
+        }).join('');
 
-        $('toolConfigCard').innerHTML = [
-            '<div style="margin-bottom:10px;font-size:13px;display:flex;flex-wrap:wrap;gap:6px">',
-            '  <span class="tag tag-ok">🎮 ' + names.length + ' 个工具</span>',
-            '  <span class="tag">📝 模板 ' + template.length + ' 字符</span>',
-            '</div>',
-            '<div class="section">',
-            '  <div class="section-title">📝 初始化模板</div>',
-            '  <textarea id="tmplEditor" rows="6" style="width:100%;padding:8px;border:1px solid #ddd;border-radius:6px;font-family:monospace;font-size:12px;line-height:1.5">' + escapeHtml(template) + '</textarea>',
-            '  <div style="display:flex;gap:8px;margin-top:6px;justify-content:flex-end">',
-            '    <button class="btn-ghost" onclick="saveToolConfig()">💾 保存模板</button>',
-            '  </div>',
-            '</div>',
-            '<div class="section" style="margin-top:10px"><div class="section-title">🔧 工具定义</div>' + toolHtml + '</div>',
-            '<div style="margin-top:10px;font-size:12px;color:#888">提示：点击"发送初始化消息"把模板 + 工具列表发给 DeepSeek 建立语境。</div>',
-            '<div id="initMsg" style="margin-top:8px"></div>',
-        ].join('\\n');
-    }} catch(e) {{
-        $('toolConfigCard').innerHTML = '<div class="empty">加载失败: ' + escapeHtml(e.message) + '</div>';
-    }} finally {{
-        if (btn) {{ btn.disabled = false; btn.textContent = '🔃 刷新'; }}
-    }}
-}}
+        $('toolConfigCard').innerHTML =
+            '<div style="margin-bottom:6px;font-size:11px;color:#888">' + names.length + ' 个工具 · 模板 ' + template.length + ' 字符</div>'
+            + '<div style="margin-bottom:6px"><b style="font-size:11px">📝 模板（发给 DeepSeek 的 system prompt）</b>'
+            + '<textarea id="tmplEditor" rows="4" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:11px;margin-top:4px">' + escapeHtml(template) + '</textarea>'
+            + '<div style="text-align:right;margin-top:4px"><button class="btn-ghost btn-sm" onclick="saveToolConfig()">💾 保存</button></div></div>'
+            + '<div><b style="font-size:11px">🔧 工具定义</b></div>' + toolHtml
+            + '<div id="initMsg" style="margin-top:6px"></div>';
+    } catch(e) { $('toolConfigCard').innerHTML = '<div class="empty">加载失败</div>'; }
+}
 
-async function saveToolConfig() {{
+function getTerminalHint(t) {
+    var hints = {
+        'powershell': '使用 PowerShell 命令（Get-ChildItem 等）',
+        'cmd': '使用 CMD 命令（dir 等）',
+        'bash': '使用 Bash 命令（ls 等）'
+    };
+    return hints[t] || '';
+}
+
+function getToolExample(name, terminal) {
+    var examples = {
+        'Bash': {
+            'powershell': '工具 Bash\\ncommand="Get-ChildItem C:\\\\Users | Select-Object -ExpandProperty Name"\\n工具结束',
+            'cmd': '工具 Bash\\ncommand="dir C:\\\\Users /ad /b"\\n工具结束',
+            'bash': '工具 Bash\\ncommand="ls -la /home"\\n工具结束'
+        },
+        'Read': {
+            'powershell': '工具 Read\\nfile_path="config.json"\\n工具结束',
+            'cmd': '工具 Read\\nfile_path="config.json"\\n工具结束',
+            'bash': '工具 Read\\nfile_path="config.json"\\n工具结束'
+        },
+        'Write': {
+            'powershell': '工具 Write\\nfile_path="hello.txt"\\ncontent="Hello World"\\n工具结束',
+            'cmd': '工具 Write\\nfile_path="hello.txt"\\ncontent="Hello World"\\n工具结束',
+            'bash': '工具 Write\\nfile_path="hello.txt"\\ncontent="Hello World"\\n工具结束'
+        },
+        'Edit': {
+            'powershell': '工具 Edit\\nfile_path="config.txt"\\nold_string="old"\\nnew_string="new"\\n工具结束',
+            'cmd': '工具 Edit\\nfile_path="config.txt"\\nold_string="old"\\nnew_string="new"\\n工具结束',
+            'bash': '工具 Edit\\nfile_path="config.txt"\\nold_string="old"\\nnew_string="new"\\n工具结束'
+        }
+    };
+    return (examples[name] && examples[name][terminal]) || '示例不可用';
+}
+
+async function changeTerminal() {
+    var t = $('terminalSelect').value;
+    try {
+        await fetch('/api/config/terminal', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({terminal:t}) });
+        currentTerminal = t;
+        $('terminalHint').textContent = getTerminalHint(t);
+        showToast('✅ 终端已切换为 ' + t, true);
+        refreshToolConfig();
+    } catch(e) { showToast('❌ 切换失败', false); }
+}
+
+        var toolHtml = names.map(name => {
+            var spec = tools[name];
+            var req = (spec.required||[]).join(', ') || '无';
+            var opt = Object.keys(spec.optional||{}).join(', ') || '无';
+            return '<div style="padding:8px;background:#fafafa;border-radius:4px;margin-bottom:6px;border-left:2px solid #1677ff">'
+                + '<div style="font-size:12px;font-weight:600;color:#1677ff">' + escapeHtml(name) + '</div>'
+                + '<div style="font-size:10px;color:#666;margin-top:4px">' + escapeHtml(spec.description||'') + '</div>'
+                + '<div style="font-size:10px;color:#888;margin-top:4px"><b>必填:</b> ' + escapeHtml(req) + ' · <b>可选:</b> ' + escapeHtml(opt) + '</div></div>';
+        }).join('');
+
+        // 自然语言示例
+        var exampleHtml = '<div style="margin-top:12px;padding:10px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px">'
+            + '<div style="font-size:12px;font-weight:600;color:#389e0d;margin-bottom:8px">💡 自然语言示例</div>'
+            + '<div style="font-size:11px;line-height:1.8">'
+
+        // 从工具生成示例
+        var toolExamples = [];
+        if (tools['Bash']) {
+            toolExamples.push({ input: '看看桌面上有什么', tool: 'Bash', args: {command: 'Get-ChildItem C:/Users/a1/Desktop'} });
+        }
+        if (tools['Read']) {
+            toolExamples.push({ input: '读一下 config.json', tool: 'Read', args: {file_path: 'config.json'} });
+        }
+        if (tools['Write']) {
+            toolExamples.push({ input: '把 hello 写到 test.txt', tool: 'Write', args: {file_path: 'test.txt', content: 'hello'} });
+        }
+        if (tools['Edit']) {
+            toolExamples.push({ input: '把 old 换成 new', tool: 'Edit', args: {file_path: 'test.txt', old_string: 'old', new_string: 'new'} });
+        }
+
+        toolHtml += '<div style="margin-top:12px"><b style="font-size:11px">🔄 转换示例</b></div>';
+        toolExamples.forEach(ex => {
+            toolHtml += '<div style="padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;margin-top:6px">'
+                + '<div style="font-size:10px;color:#999">用户说: "' + escapeHtml(ex.input) + '"</div>'
+                + '<div style="font-size:11px;margin-top:4px;color:#52c41a">→ DeepSeek 返回:</div>'
+                + '<pre style="margin:4px 0;padding:6px;background:#f5f5f5;border-radius:3px;font-size:10px;white-space:pre-wrap">工具 ' + ex.tool + '\\n' + Object.entries(ex.args).map(([k,v]) => k + '=\\"' + v + '\\"').join('\\n') + '\\n工具结束</pre>'
+                + '<div style="font-size:11px;color:#1677ff">→ 解析为:</div>'
+                + '<pre style="margin:4px 0;padding:6px;background:#e6f7ff;border-radius:3px;font-size:10px;white-space:pre-wrap">' + escapeHtml(JSON.stringify({name:ex.tool, arguments:ex.args}, null, 2)) + '</pre>'
+                + '</div>';
+        });
+
+        $('toolConfigCard').innerHTML =
+            '<div style="margin-bottom:6px;font-size:11px;color:#888">' + names.length + ' 个工具 · 模板 ' + template.length + ' 字符</div>'
+            + '<div style="margin-bottom:6px"><b style="font-size:11px">📝 模板（发给 DeepSeek 的 system prompt）</b>'
+            + '<textarea id="tmplEditor" rows="4" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:11px;margin-top:4px">' + escapeHtml(template) + '</textarea>'
+            + '<div style="text-align:right;margin-top:4px"><button class="btn-ghost btn-sm" onclick="saveToolConfig()">💾 保存</button></div></div>'
+            + '<div><b style="font-size:11px">🔧 工具定义</b></div>' + toolHtml
+            + '<div id="initMsg" style="margin-top:6px"></div>';
+    } catch(e) { $('toolConfigCard').innerHTML = '<div class="empty">加载失败</div>'; }
+}
+
+async function saveToolConfig() {
     var tmpl = $('tmplEditor').value;
-    if (!tmpl.trim()) {{ alert('模板不能为空'); return; }}
-    var btn = document.querySelector('#toolConfigCard .btn-ghost[onclick="saveToolConfig()"]');
-    if (btn) {{ btn.textContent = '⏳ 保存中…'; btn.disabled = true; }}
-    try {{
-        var r = await fetch('/api/tool-config', {{
-            method: 'POST', headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{template: tmpl}}),
-        }});
+    if (!tmpl.trim()) { alert('模板不能为空'); return; }
+    try {
+        var r = await fetch('/api/tool-config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({template:tmpl}) });
         var d = await r.json();
-        if (d.ok) {{ showMsg('initMsg', '✅ 模板已保存', true); refreshToolConfig(); }}
-        else {{ showMsg('initMsg', '❌ ' + (d.error || '保存失败'), false); }}
-    }} catch(e) {{ showMsg('initMsg', '❌ ' + escapeHtml(e.message), false); }}
-    finally {{ if (btn) {{ btn.textContent = '💾 保存模板'; btn.disabled = false; }} }}
-}}
+        if (d.ok) { showToast('✅ 已保存', true); refreshToolConfig(); }
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
 
-async function initTools() {{
-    if (!confirm('确认发送初始化消息到 DeepSeek？\\n\\n这会把 \\"我们来玩一个游戏\\" + 工具列表 作为第一条消息发给当前 session。')) return;
-    var btn = document.querySelector('button[onclick="initTools()"]');
-    if (btn) {{ btn.textContent = '⏳ 发送中…'; btn.disabled = true; }}
-    try {{
-        var r = await fetch('/api/tool-config/init', {{method: 'POST'}});
+async function initTools() {
+    if (!confirm('发送初始化消息到 DeepSeek？')) return;
+    try {
+        var r = await fetch('/api/tool-config/init', {method:'POST'});
         var d = await r.json();
-        if (d.ok) {{ showMsg('initMsg', '✅ 已发送，DeepSeek 回复：' + escapeHtml(d.response_preview), true); refreshToolConfig(); }}
-        else {{ showMsg('initMsg', '❌ ' + (d.error || '发送失败'), false); }}
-    }} catch(e) {{ showMsg('initMsg', '❌ ' + escapeHtml(e.message), false); }}
-    finally {{ if (btn) {{ btn.textContent = '📤 发送初始化消息'; btn.disabled = false; }} }}
-}}
+        if (d.ok) showToast('✅ 已发送', true);
+        else showToast('❌ ' + (d.error||'失败'), false);
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
 
-refreshToolConfig();
-</script>
-</body>
-</html>"""
+refreshToolConfig();"""
 
-    # 用 STATUS_HTML 替换占位
-    return HTML.replace('{STATUS_HTML}', STATUS_HTML)
+    sidebar = _sidebar("/admin/tools")
+    return _page_shell("工具", sidebar, content, js)
+
+
+def render_debug():
+    """审批拦截页"""
+    content = """<div class="card">
+  <div class="toolbar">
+    <h2>🔍 审批拦截 <span id="pendingCount" style="font-size:10px;color:#999;font-weight:400"></span></h2>
+    <div class="actions">
+      <button class="btn-ghost btn-sm" id="approvalToggle" onclick="toggleApproval()">▶️ 开启</button>
+      <button class="btn-ghost btn-sm" id="transparentToggle" onclick="toggleTransparent()">👁 透明模式</button>
+      <button class="btn-ghost btn-sm" onclick="approveAll()">✅ 全部放行</button>
+      <button class="btn-ghost btn-sm" onclick="clearAll()">🗑 清空</button>
+      <button class="btn-ghost btn-sm" onclick="refreshPending()">🔃 刷新</button>
+    </div>
+  </div>
+  <div id="pendingList"><div class="empty">加载中...</div></div>
+</div>
+
+<div class="card" style="margin-top:12px">
+  <div class="toolbar">
+    <h2>📋 已审批历史</h2>
+    <div class="actions">
+      <button class="btn-ghost btn-sm" onclick="refreshHistory()">🔃 刷新</button>
+    </div>
+  </div>
+  <div id="historyList"><div class="empty">加载中...</div></div>
+</div>"""
+
+    js = """\
+async function refreshPending() {
+    try {
+        var r = await fetch('/api/approval/pending');
+        var d = await r.json();
+        var items = d.items || [];
+        $('pendingCount').textContent = '(' + items.length + ')';
+        $('approvalToggle').textContent = d.enabled ? '⏸ 关闭' : '▶️ 开启';
+        $('approvalToggle').className = d.enabled ? 'btn-ghost btn-sm btn-warn' : 'btn-ghost btn-sm';
+        $('transparentToggle').textContent = d.transparent ? '👁 透明模式(开)' : '👁 透明模式';
+        $('transparentToggle').className = d.transparent ? 'btn-ghost btn-sm btn-warn' : 'btn-ghost btn-sm';
+        if (items.length === 0) { $('pendingList').innerHTML = '<div class="empty">暂无待审批项</div>'; return; }
+        $('pendingList').innerHTML = items.map(item => renderItem(item, true)).join('');
+    } catch(e) { $('pendingList').innerHTML = '<div class="empty">加载失败</div>'; }
+}
+
+async function refreshHistory() {
+    try {
+        var r = await fetch('/api/approval/history?limit=30');
+        var d = await r.json();
+        var items = d.items || [];
+        if (items.length === 0) { $('historyList').innerHTML = '<div class="empty">暂无历史</div>'; return; }
+        $('historyList').innerHTML = items.map(item => renderItem(item, false)).join('');
+    } catch(e) { $('historyList').innerHTML = '<div class="empty">加载失败</div>'; }
+}
+
+function renderItem(item, pending) {
+    var time = item.timestamp ? new Date(item.timestamp * 1000).toLocaleTimeString('zh-CN') : '';
+    var isReq = item.type === 'request';
+    var badge = isReq
+        ? '<span class="tag" style="background:#e6f7ff;color:#1890ff">请求</span>'
+        : '<span class="tag" style="background:#f6ffed;color:#52c41a">响应</span>';
+    var statusTag = '';
+    if (!pending) {
+        if (item.approved === true) statusTag = '<span class="tag tag-ok">已放行</span>';
+        else if (item.approved === false) statusTag = '<span class="tag tag-fail">已拒绝</span>';
+    }
+    var header = item.method
+        ? item.method + ' ' + item.path
+        : (item.status ? item.status + ' OK' : item.path);
+    var dur = item.duration_ms ? ' · ' + item.duration_ms.toFixed(0) + 'ms' : '';
+    var editedBadge = item.edited_body ? ' <span class="tag" style="background:#fff7e6;color:#d46b08">已编辑</span>' : '';
+
+    // 预览：前 200 字符
+    var preview = '';
+    if (item.body) {
+        try { preview = JSON.stringify(item.body, null, 2); } catch(e) { preview = String(item.body); }
+        preview = preview.slice(0, 200) + (preview.length > 200 ? '...' : '');
+    }
+    // 转换预览
+    var convPreview = '';
+    if (item.conversion && item.conversion.user_content) {
+        convPreview = item.conversion.user_content.slice(0, 100) + (item.conversion.user_content.length > 100 ? '...' : '');
+    }
+
+    var actions = '';
+    if (pending) {
+        var editLabel = isReq ? '✏️ 编辑内容' : '✏️ 编辑响应';
+        actions = '<div class="item-actions">'
+            + '<button class="btn-ghost btn-sm" onclick="openEditModal(' + item.id + ', \\'' + escapeHtml(isReq ? '请求' : '响应') + '\\')">' + editLabel + '</button>'
+            + '<button class="btn-primary btn-sm" onclick="doApprove(' + item.id + ')">✅ 放行</button>'
+            + '<button class="btn-danger btn-sm" onclick="doReject(' + item.id + ')">❌ 拒绝</button>'
+            + '</div>';
+    }
+
+    return '<div class="item-card" style="margin-bottom:8px">'
+        + '<div class="item-head" style="cursor:pointer">'
+        + '<div class="item-info">'
+        + '<div class="item-title">' + badge + ' <span style="font-family:monospace;font-size:12px">' + escapeHtml(header) + '</span> ' + statusTag + editedBadge + '</div>'
+        + '<div class="item-meta">' + time + dur + '</div>'
+        + (convPreview ? '<div class="item-meta" style="color:#52c41a">用户消息: ' + escapeHtml(convPreview) + '</div>' : '')
+        + '</div>' + actions
+        + '</div>'
+        + '<div class="item-detail" style="display:flex;gap:6px;flex-wrap:wrap;padding:8px">'
+        + '<button class="btn-ghost btn-sm" onclick="showFullJson(' + item.id + ', \\'' + escapeHtml(isReq ? '请求 Body' : '响应 Body') + '\\')">📋 查看完整 JSON</button>'
+        + (convPreview ? '<button class="btn-ghost btn-sm" onclick="showFullConv(' + item.id + ')">🔄 查看转换结果</button>' : '')
+        + '</div>'
+        + '</div>';
+}
+
+async function showFullJson(id, title) {
+    // 从 pending 或 history 获取完整数据
+    try {
+        var r = await fetch('/api/approval/history?limit=100');
+        var d = await r.json();
+        var item = (d.items || []).find(i => i.id === id);
+        if (!item) { r = await fetch('/api/approval/pending'); d = await r.json(); item = (d.items || []).find(i => i.id === id); }
+        if (!item) { showToast('未找到', false); return; }
+        var json = JSON.stringify(item.body, null, 2);
+        openModalRaw(title, '<pre id="fullJsonPre" style="margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.5;max-height:70vh;overflow:auto;background:#f5f5f5;padding:12px;border-radius:4px">' + escapeHtml(json) + '</pre>'
+            + '<div style="margin-top:8px;text-align:right"><button class="btn-ghost btn-sm" onclick="copyJson()">📋 复制</button></div>');
+    } catch(e) { showToast('加载失败', false); }
+}
+
+async function showFullConv(id) {
+    try {
+        var r = await fetch('/api/approval/history?limit=100');
+        var d = await r.json();
+        var item = (d.items || []).find(i => i.id === id);
+        if (!item) { r = await fetch('/api/approval/pending'); d = await r.json(); item = (d.items || []).find(i => i.id === id); }
+        if (!item || !item.conversion) { showToast('未找到', false); return; }
+        var conv = item.conversion;
+        var html = '<div style="font-size:12px;line-height:1.8">'
+            + '<div><b>类型:</b> ' + (conv.is_react_continuation ? 'React 续接' : '新对话') + '</div>'
+            + '<div><b>消息数:</b> ' + (conv.messages_count || 0) + '</div>'
+            + '<div style="margin-top:8px"><b>用户消息:</b></div>'
+            + '<pre style="margin:0;white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.5;max-height:60vh;overflow:auto;background:#f6ffed;padding:12px;border-radius:4px;border:1px solid #b7eb8f">' + escapeHtml(conv.user_content || '(空)') + '</pre>'
+            + '</div>';
+        openModalRaw('🔄 转换结果 (build_ds_input)', html);
+    } catch(e) { showToast('加载失败', false); }
+}
+
+function copyJson() {
+    var el = document.getElementById('fullJsonPre');
+    if (el) { navigator.clipboard.writeText(el.textContent).then(() => showToast('已复制', true)); }
+}
+
+async function toggleApproval() {
+    try { await fetch('/api/approval/toggle', {method:'POST'}); refreshPending(); } catch(e) {}
+}
+
+async function toggleTransparent() {
+    try {
+        var r = await fetch('/api/approval/transparent', {method:'POST'});
+        var d = await r.json();
+        $('transparentToggle').textContent = d.transparent ? '👁 透明模式(开)' : '👁 透明模式';
+        $('transparentToggle').className = d.transparent ? 'btn-ghost btn-sm btn-warn' : 'btn-ghost btn-sm';
+        showToast(d.transparent ? '✅ 透明模式开启：直接放行但留痕' : '✅ 透明模式关闭', true);
+    } catch(e) {}
+}
+
+async function doApprove(id) {
+    try { await fetch('/api/approval/approve/' + id, {method:'POST'}); refreshPending(); refreshHistory(); } catch(e) {}
+}
+
+async function doReject(id) {
+    try { await fetch('/api/approval/reject/' + id, {method:'POST'}); refreshPending(); refreshHistory(); } catch(e) {}
+}
+
+async function approveAll() {
+    try { await fetch('/api/approval/approve-all', {method:'POST'}); refreshPending(); refreshHistory(); } catch(e) {}
+}
+
+async function clearAll() {
+    try { await fetch('/api/approval/clear', {method:'POST'}); refreshPending(); refreshHistory(); } catch(e) {}
+}
+
+var currentEditId = null;
+var currentEditType = null;
+
+async function openEditModal(id, type) {
+    currentEditId = id;
+    currentEditType = type;
+    try {
+        var r = await fetch('/api/approval/pending');
+        var d = await r.json();
+        var item = (d.items || []).find(i => i.id === id);
+        if (!item) { showToast('未找到', false); return; }
+
+        var editContent = '';
+        var title = '';
+        if (type === '请求') {
+            // 请求：编辑 conversion.user_content（发给 DeepSeek 的最终消息）
+            var conv = item.conversion || {};
+            editContent = (item.edited_body && item.edited_body.user_content) ? item.edited_body.user_content : (conv.user_content || '');
+            title = '✏️ 编辑发送内容（user_content）';
+        } else {
+            // 响应：编辑最终 OpenAI response
+            var body = item.body;
+            if (item.edited_body) body = item.edited_body;
+            editContent = JSON.stringify(body, null, 2);
+            title = '✏️ 编辑响应（OpenAI Response）';
+        }
+
+        var html = '<div style="font-size:12px;margin-bottom:8px;color:#666">' + (type === '请求' ? '修改发给 DeepSeek 的消息' : '修改返回给客户端的响应') + '</div>'
+            + '<textarea id="editBodyArea" style="width:100%;height:400px;padding:8px;border:1px solid #d9d9d9;border-radius:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;white-space:pre-wrap;word-break:break-all;resize:vertical">' + escapeHtml(editContent) + '</textarea>'
+            + '<div style="display:flex;gap:6px;margin-top:8px;justify-content:flex-end">'
+            + '<button class="btn-ghost" onclick="closeModal()">取消</button>'
+            + '<button class="btn-primary btn-sm" onclick="saveEditBody()">💾 保存</button></div>';
+        openModalRaw(title, html);
+    } catch(e) { showToast('加载失败', false); }
+}
+
+async function saveEditBody() {
+    if (!currentEditId) return;
+    var text = $('editBodyArea').value;
+
+    var edited;
+    if (currentEditType === '请求') {
+        // 请求：保存为 {user_content: "..."}
+        edited = {user_content: text};
+    } else {
+        // 响应：解析 JSON
+        try { edited = JSON.parse(text); } catch(e) { showToast('JSON 格式错误', false); return; }
+    }
+
+    try {
+        var r = await fetch('/api/approval/edit/' + currentEditId, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({body:edited}) });
+        var d = await r.json();
+        if (d.ok) { closeModal(); showToast('✅ 已保存，点放行生效', true); refreshPending(); }
+        else { showToast('❌ ' + (d.error||'失败'), false); }
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+
+refreshPending();
+refreshHistory();
+setInterval(refreshPending, 2000);  // 自动刷新待审批列表"""
+
+    sidebar = _sidebar("/admin/debug")
+    return _page_shell("审批拦截", sidebar, content, js)

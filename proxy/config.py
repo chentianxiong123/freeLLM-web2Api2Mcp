@@ -1,7 +1,6 @@
 """单账号配置管理（取代 deepseek-free-api 的多账号 ConfigManager）"""
 
 import json
-import os
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
@@ -16,10 +15,11 @@ DEFAULT_CONFIG = {
     "_email": "",
     "_mobile": "",
     "_area_code": "+86",
-    "port": 8080,
+    "port": 48391,
     "thinking_enabled": True,
     "proxy": "",
     "account_label": "default",
+    "terminal": "powershell",  # cmd / powershell / bash
 }
 
 

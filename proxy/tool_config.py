@@ -21,24 +21,17 @@ from pathlib import Path
 _FILE = Path(__file__).parent / "tool_config.json"
 
 
-DEFAULT_TEMPLATE = """我们来玩一个游戏。
+DEFAULT_TEMPLATE = """好的，我来帮你处理。
 
-现在你是一个"幕后黑手"，你戴着耳麦，通过一台终端机操控一个叫 Claude Code 的智能体。
+比如你说"看看桌面上有什么"，我会这样做：
 
-你不需要自己做任何操作，你只需要"发指令"给 Claude Code，它会帮你执行。
-每次只能发一条指令，收到执行结果后你再决定下一步。
+我先看看桌面有什么文件。
 
-指令格式：
-
-工具 工具名
-参数名="参数值"
+工具 Bash
+command="Get-ChildItem C:/Users/a1/Desktop"
 工具结束
 
-—— 规则 ——
-1. 需要操作时用 "工具 名称" 开头，"工具结束" 结尾
-2. 参数写成 key="value"，一行一个
-3. 不需要操作就只回复想法，不带指令
-4. 指令块前后可以有你的分析"""
+然后等你告诉我执行结果，我再决定下一步。"""
 
 
 DEFAULT_TOOLS = {
@@ -113,22 +106,15 @@ def update_config(patch: dict) -> dict:
 
 
 def build_init_prompt() -> str:
-    """构造完整的初始化提示词 = 模板 + 工具列表"""
+    """构造完整的初始化提示词 = 模板 + 工具列表（自然语言版）"""
     data = _load()
     template = data.get("template", DEFAULT_TEMPLATE)
 
-    # 自动生成工具列表块
+    # 自然语言工具列表（简洁版）
     tools = data.get("tools", DEFAULT_TOOLS)
-    tool_lines = ["\n—— 可用工具 ——"]
+    tool_lines = ["\n我能用的："]
     for name, spec in tools.items():
-        tool_lines.append(f"\n{name}")
-        tool_lines.append(f"  用途：{spec.get('description', '')}")
-        req = spec.get("required", [])
-        if req:
-            tool_lines.append(f"  必填参数：{', '.join(req)}")
-        opt = spec.get("optional", {})
-        if opt:
-            for k, v in opt.items():
-                tool_lines.append(f"  可选参数：{k}（{v}）")
+        desc = spec.get("description", "")
+        tool_lines.append(f"  {name} - {desc}")
 
     return template + "\n" + "\n".join(tool_lines)

@@ -2,11 +2,6 @@
 
 将 DeepSeek 网页端免费对话转换为 OpenAI Chat Completions API，
 供 Claude Code（OpenAI 模式）作为后端模型使用。
-
-特点：
-- 单会话持久化，不新建
-- 增量消息传递，依赖服务端上下文
-- 网关审批：所有请求先挂起，管理员确认后才发送
 """
 
 import sys
@@ -22,41 +17,91 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 
-from core.chat_handler import stream_chat_to_sse
-from providers.mock import ScriptedProvider, BashListProvider
+from handler import stream_chat_to_sse, build_ds_input, collect_response, react_loop
+import approval
+from login import login as ds_login
+from debug_interceptor import interceptor
+import accounts
 import config
 import deepseek_api as ds_api
 import session as sess
 import gateway
 import rules
 import tool_config
-import tool_format
-from admin_page import render_admin_html
 
 app = FastAPI(
     title="DeepSeek Web Agent Proxy",
-    version="0.1.0",
+    version="0.3.0",
     description="DeepSeek 网页端 → OpenAI Chat Completions API 代理",
 )
 
 
-# ── 错误处理中间件 ──────────────────────────────────────
+# ── 调试拦截中间件 ──────────────────────────────────────
 
 
 @app.middleware("http")
-async def error_middleware(request: Request, call_next):
+async def debug_middleware(request: Request, call_next):
+    """捕获所有请求/响应用于调试。"""
+    path = request.url.path
+    # 跳过静态资源和 admin 页面
+    if path.startswith("/admin") or path == "/":
+        return await call_next(request)
+
+    body = None
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    rec = interceptor.start_request(
+        method=request.method,
+        path=path,
+        body=body,
+        headers=dict(request.headers),
+    )
+
     try:
         response = await call_next(request)
+        # 读取响应 body（只对 JSON 响应）
+        resp_body = None
+        if "application/json" in response.headers.get("content-type", ""):
+            resp_body = b""
+            async for chunk in response.body_iterator:
+                resp_body += chunk if isinstance(chunk, bytes) else chunk.encode()
+            try:
+                parsed = json.loads(resp_body)
+            except Exception:
+                parsed = resp_body.decode()[:5000] if resp_body else None
+            resp_body = parsed
+
+            interceptor.finish_request(
+                rec,
+                status=response.status_code,
+                body=resp_body,
+                headers=dict(response.headers),
+            )
+            # 重建响应，否则 body_iterator 已被消费
+            from starlette.responses import Response as StarletteResponse
+            new_headers = {k: v for k, v in response.headers.items() if k.lower() not in ('content-length', 'content-type')}
+            return StarletteResponse(
+                content=resp_body if isinstance(resp_body, (str, bytes)) else json.dumps(resp_body, ensure_ascii=False),
+                status_code=response.status_code,
+                headers=new_headers,
+                media_type="application/json",
+            )
+
+        interceptor.finish_request(
+            rec,
+            status=response.status_code,
+            body=None,
+            headers=dict(response.headers),
+        )
         return response
     except Exception as e:
+        interceptor.finish_request(rec, status=500, error=str(e))
         return JSONResponse(
             status_code=500,
-            content={
-                "error": {
-                    "type": "internal_server_error",
-                    "message": str(e),
-                },
-            },
+            content={"error": {"type": "internal_server_error", "message": str(e)}},
         )
 
 
@@ -65,18 +110,7 @@ async def error_middleware(request: Request, call_next):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    """OpenAI Chat Completions 端点 — v2 架构（react_loop + Provider）。
-
-    旧版 200 行的 react 内联 + housekeeping + rules + handle_chat 全部委托给
-    core.chat_handler.stream_chat_to_sse。
-
-    行为：
-      - housekeeping → 返空 stop
-      - rules 拦截 → 返空 stop
-      - 否则 → 调 _CURRENT_PROVIDER，stream 出来
-
-    当前默认是 BashListProvider（mock），等 DeepSeekProvider 接入后可切换。
-    """
+    """OpenAI Chat Completions 端点。全部走非流式。"""
     try:
         body = await request.json()
     except Exception:
@@ -84,72 +118,98 @@ async def chat_completions(request: Request):
             "error": {"message": "Invalid JSON", "type": "invalid_request_error"},
         })
 
-    is_stream = bool(body.get("stream", True))
     request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    model = body.get("model", "deepseek-v4-flash")
+    tools = body.get("tools", []) or []
 
-    if is_stream:
-        async def gen():
-            async for sse in stream_chat_to_sse(_CURRENT_PROVIDER, body, request_id=request_id):
-                yield sse
-        return StreamingResponse(
-            gen(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
-        )
-    else:
-        # 非流式：收集 SSE → 拼成 JSON
-        full_content = ""
-        tool_calls = []
-        finish_reason = "stop"
-        async for sse in stream_chat_to_sse(_CURRENT_PROVIDER, body, request_id=request_id):
-            line = sse.strip()
-            if not line.startswith("data: ") or line == "data: [DONE]":
-                continue
-            try:
-                chunk = json.loads(line[6:])
-            except Exception:
-                continue
-            delta = chunk.get("choices", [{}])[0].get("delta", {})
-            if "content" in delta and delta["content"]:
-                full_content += delta["content"]
-            if "tool_calls" in delta:
-                for tc in delta["tool_calls"]:
-                    if "id" in tc:
-                        tool_calls.append({"id": tc["id"], "type": "function", "function": tc.get("function", {})})
-            if chunk.get("choices", [{}])[0].get("finish_reason"):
-                finish_reason = chunk["choices"][0]["finish_reason"]
+    # 调试：打印 body 结构
+    msgs = body.get("messages", [])
+    print(f"[chat_completions] model={model}, messages_count={len(msgs)}, tools_count={len(tools)}")
+    for i, m in enumerate(msgs):
+        role = m.get("role", "?")
+        content = m.get("content", "")
+        preview = content[:150].replace('\n', ' ') if isinstance(content, str) else str(content)[:150]
+        print(f"[chat_completions]   [{i}] role={role}, content_preview={preview}")
+        if role == "tool":
+            print(f"[chat_completions]   >>> TOOL ROLE IN BODY <<<")
 
-        message = {"role": "assistant", "content": full_content or ("" if tool_calls else "")}
-        if tool_calls:
-            message["tool_calls"] = tool_calls
-        return JSONResponse(content={
-            "id": request_id,
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": body.get("model", "deepseek-v4-flash"),
-            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    # 预转换：提取用户消息
+    chat_req = build_ds_input(body)
+
+    # 审批：请求（含转换结果）
+    req_result = await approval.queue.intercept_request(
+        method="POST", path="/v1/chat/completions",
+        body=body, headers=dict(request.headers),
+        conversion={
+            "user_content": chat_req.user_content[:5000] if chat_req.user_content else "",
+            "is_react_continuation": chat_req.is_react_continuation,
+            "tool_call_ids": chat_req.tool_call_ids,
+            "messages_count": len(body.get("messages", [])),
+        },
+    )
+    if req_result["action"] == "reject":
+        return JSONResponse(status_code=403, content={
+            "error": {"message": req_result.get("error", "请求被拒绝"), "type": "permission_error"},
         })
+
+    # 获取当前活跃账号的 config
+    cfg = accounts.get_account_config()
+    if not cfg.get("token"):
+        return JSONResponse(status_code=401, content={
+            "error": {"message": "No active account", "type": "authentication_error"},
+        })
+
+    # 调用 Provider 收集完整响应（React 循环：本地执行 DS 的工具调用）
+    t0 = time.time()
+
+    # 使用编辑后的 user_content（如果有）
+    final_user_content = chat_req.user_content
+    if req_result.get("edited") and req_result.get("body"):
+        edited = req_result["body"]
+        if isinstance(edited, dict) and "user_content" in edited:
+            final_user_content = edited["user_content"]
+
+    resp_body = await react_loop(
+        _CURRENT_PROVIDER,
+        final_user_content,
+        request_id=request_id,
+        model=model,
+        tools_schema=tools,
+    )
+
+    duration_ms = (time.time() - t0) * 1000
+
+    # 审批：响应
+    resp_result = await approval.queue.intercept_response(
+        request_item_id=0, status=200,
+        body=resp_body, duration_ms=duration_ms,
+    )
+    if resp_result["action"] == "reject":
+        return JSONResponse(status_code=403, content={
+            "error": {"message": resp_result.get("error", "响应被拒绝"), "type": "permission_error"},
+        })
+
+    # 使用编辑后的响应（如果有）
+    final_resp = resp_body
+    if resp_result.get("edited") and resp_result.get("body"):
+        final_resp = resp_result["body"]
+
+    return JSONResponse(content=final_resp)
 
 
 @app.get("/v1/models")
 async def list_models():
-    """返回可用模型列表（OpenAI 格式）。
-
-    列出的是客户端可以请求的 OpenAI 模型名（不是 DeepSeek 内部 model_type）。
-    内部路由：default -> deepseek-v4-flash, expert -> deepseek-v4-pro
-    """
-    models_data = [
+    """返回可用模型列表。"""
+    return {"object": "list", "data": [
         {"id": "deepseek-v4-flash", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
         {"id": "deepseek-v4-pro", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
-    ]
-    return {"object": "list", "data": models_data}
+    ]}
 
 
 @app.get("/health")
 async def health():
     """健康检查"""
-    cfg = config.load_config()
+    cfg = accounts.get_account_config()
     has_session = bool(cfg.get("session_id"))
     usage = sess.get_usage_status() if has_session else {}
     return {
@@ -160,67 +220,89 @@ async def health():
     }
 
 
-# ── 审批 API ──────────────────────────────────────────
+# ── 账号管理 API ──────────────────────────────────────
 
 
-@app.get("/api/pending")
-async def api_pending():
-    """获取待审批请求列表"""
-    return {"requests": gateway.get_pending_list()}
+@app.get("/api/accounts")
+async def api_list_accounts():
+    """列出所有账号。"""
+    return {"accounts": accounts.list_accounts()}
 
 
-@app.get("/api/request/{req_id}")
-async def api_request_detail(req_id: str):
-    """获取单个请求的完整详情"""
-    detail = gateway.get_request_detail(req_id)
-    if not detail:
-        return JSONResponse(status_code=404, content={"error": "not found"})
-    return detail
-
-
-@app.post("/api/approve/{req_id}")
-async def api_approve(req_id: str):
-    """放行请求"""
-    ok = gateway.approve(req_id)
-    return {"ok": ok, "id": req_id}
-
-
-@app.post("/api/reject/{req_id}")
-async def api_reject(req_id: str):
-    """拒绝请求"""
-    ok = gateway.reject(req_id)
-    return {"ok": ok, "id": req_id}
-
-
-# ── 测试触发器（调试用） ──────────────────────────────────────
-
-
-@app.post("/api/test/mock")
-async def api_test_mock(request: Request):
-    """测试触发器：直接构造一个最小化的 OpenAI 请求走 mock 路径。
-
-    用法：POST /api/test/mock，body 里可带 {"stream": true/false, "prompt": "你好"}
-    默认 prompt = "你好"，stream = true。
-    """
+@app.post("/api/accounts/add")
+async def api_add_account(request: Request):
+    """添加账号并自动登录。body: {label, login_type, account, password}"""
     try:
         body = await request.json()
     except Exception:
-        body = {}
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    new_acc = accounts.add_account(
+        label=body.get("label", ""),
+        login_type=body.get("login_type", "email"),
+        account=body.get("account", ""),
+        password=body.get("password", ""),
+    )
+    # 自动登录
+    result = ds_login(new_acc["login_type"], body.get("account", ""), body.get("password", ""))
+    if result and result.get("token"):
+        accounts.save_account_token(
+            new_acc["id"],
+            token=result.get("token", ""),
+            session_id=result.get("session_id", ""),
+            headers=result.get("headers", {}),
+        )
+        return {"ok": True, "account": new_acc, "logged_in": True}
+    return {"ok": True, "account": new_acc, "logged_in": False, "message": "已添加但登录失败，请手动登录"}
 
-    prompt = body.get("prompt", "你好")
-    is_stream = bool(body.get("stream", True))
-    model = body.get("model", "deepseek-v4-flash")
 
-    fake_body = {
-        "model": model,
-        "stream": is_stream,
-        "messages": [{"role": "user", "content": prompt}],
-    }
+@app.post("/api/accounts/delete/{acc_id}")
+async def api_delete_account(acc_id: str):
+    """删除账号。"""
+    ok = accounts.delete_account(acc_id)
+    return {"ok": ok, "id": acc_id}
 
-    # 直接调用 chat_completions 让它走和 Claude Code 一样的分支
-    fake_request = Request(scope={"type": "http", "method": "POST", "headers": []})
-    fake_request._body = json.dumps(fake_body).encode("utf-8")
-    return await chat_completions(fake_request)
+
+@app.post("/api/accounts/activate/{acc_id}")
+async def api_activate_account(acc_id: str):
+    """切换活跃账号。"""
+    ok = accounts.activate_account(acc_id)
+    if ok:
+        # 同步更新 session.py 的 active session
+        acc = accounts.get_active_account()
+        if acc and acc.get("session_id"):
+            sess.activate_session(acc["session_id"])
+    return {"ok": ok, "id": acc_id}
+
+
+@app.post("/api/accounts/login/{acc_id}")
+async def api_login_account(acc_id: str, request: Request):
+    """登录指定账号。"""
+    accs = accounts._load()
+    target = None
+    for acc in accs:
+        if acc.get("id") == acc_id:
+            target = acc
+            break
+    if not target:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "账号不存在"})
+
+    result = ds_login(target["login_type"], target["account"], target["password"])
+    if result and result.get("token"):
+        accounts.save_account_token(
+            acc_id,
+            token=result.get("token", ""),
+            session_id=result.get("session_id", ""),
+            headers=result.get("headers", {}),
+        )
+        return {"ok": True, "message": "登录成功"}
+    return JSONResponse(status_code=401, content={"ok": False, "error": "登录失败"})
+
+
+@app.post("/api/accounts/import")
+async def api_import_account():
+    """从旧版 config.json 导入账号。"""
+    ok = accounts.import_from_config()
+    return {"ok": ok, "message": "已导入" if ok else "无需导入（已存在或无数据）"}
 
 
 # ── 违规拦截规则 API ──────────────────────────────
@@ -232,9 +314,16 @@ async def api_list_rules():
     return {"rules": rules.list_rules()}
 
 
+@app.post("/api/rules/reset")
+async def api_reset_rules():
+    """重置为默认规则集。"""
+    new_rules = rules.reset_to_defaults()
+    return {"ok": True, "rules": new_rules}
+
+
 @app.post("/api/rules/add")
 async def api_add_rule(request: Request):
-    """新增规则。body: {name, type, pattern?, scope?, case_sensitive?, enabled?, note?}"""
+    """新增规则。"""
     try:
         body = await request.json()
     except Exception:
@@ -245,7 +334,7 @@ async def api_add_rule(request: Request):
 
 @app.post("/api/rules/update/{rule_id}")
 async def api_update_rule(rule_id: str, request: Request):
-    """部分更新规则。body: 任意字段。"""
+    """更新规则。"""
     try:
         body = await request.json()
     except Exception:
@@ -265,7 +354,7 @@ async def api_delete_rule(rule_id: str):
 
 @app.post("/api/rules/toggle/{rule_id}")
 async def api_toggle_rule(rule_id: str, request: Request):
-    """切换 enabled。body: {enabled?: bool}（不传则反转）"""
+    """切换 enabled。"""
     try:
         body = await request.json()
     except Exception:
@@ -276,33 +365,18 @@ async def api_toggle_rule(rule_id: str, request: Request):
     return {"ok": True, "rule": updated}
 
 
-@app.post("/api/rules/reset")
-async def api_reset_rules():
-    """重置为默认规则集。"""
-    new_rules = rules.reset_to_defaults()
-    return {"ok": True, "rules": new_rules}
-
-
 @app.post("/api/rules/test")
 async def api_test_rules(request: Request):
-    """测试：拿一段 user 消息 / body，看会被哪些规则命中。
-
-    body: {prompt?: str, body?: dict}
-    返回 {hits: [...], blocked: bool, first_hit?: {...}}
-    """
+    """测试规则命中。"""
     try:
         req_body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
 
-    # 构造一个 body
     body = req_body.get("body")
     if not isinstance(body, dict):
         prompt = req_body.get("prompt", "")
-        body = {
-            "model": "deepseek-v4-flash",
-            "messages": [{"role": "user", "content": prompt}],
-        }
+        body = {"model": "deepseek-v4-flash", "messages": [{"role": "user", "content": prompt}]}
 
     clean_prompt = ""
     try:
@@ -310,49 +384,15 @@ async def api_test_rules(request: Request):
     except Exception:
         pass
 
-    # 模拟 rules.is_blocked 的遍历但收集所有命中
-    import json as _json
-    full_body_text = _json.dumps(body, ensure_ascii=False, default=str) if body else ""
-
-    hits = []
-    blocked = False
-    first_hit = None
-    for r in rules.list_rules():
-        if not r.get("enabled", True):
-            continue
-        rtype = r.get("type", "")
-        scope = r.get("scope", "body")
-        pattern = r.get("pattern", "")
-        text = full_body_text if scope in ("body", "any") else clean_prompt
-
-        matched = False
-        if rtype == "empty_clean_prompt":
-            matched = not clean_prompt.strip()
-        elif pattern:
-            haystack = text if r.get("case_sensitive", False) else text.lower()
-            needle = pattern if r.get("case_sensitive", False) else pattern.lower()
-            if rtype == "keyword_substring":
-                matched = needle in haystack
-            elif rtype == "regex":
-                import re
-                flags = 0 if r.get("case_sensitive", False) else re.IGNORECASE
-                try:
-                    matched = bool(re.search(pattern, text, flags))
-                except re.error:
-                    pass
-
-        if matched:
-            hits.append(r)
-            if not blocked:
-                blocked = True
-                first_hit = r
+    blocked, hit_rule = rules.is_blocked(body, clean_prompt)
+    hits = [hit_rule] if hit_rule else []
 
     return {
         "ok": True,
         "clean_prompt_len": len(clean_prompt),
         "clean_prompt_preview": clean_prompt[:200],
         "blocked": blocked,
-        "first_hit": first_hit,
+        "first_hit": hit_rule,
         "hits": hits,
     }
 
@@ -364,15 +404,12 @@ async def api_test_rules(request: Request):
 async def api_get_tool_config():
     """获取工具定义列表 + 模板。"""
     cfg = tool_config.get_config()
-    return {
-        "template": cfg.get("template", ""),
-        "tools": cfg.get("tools", {}),
-    }
+    return {"template": cfg.get("template", ""), "tools": cfg.get("tools", {})}
 
 
 @app.post("/api/tool-config")
 async def api_save_tool_config(request: Request):
-    """保存工具定义和模板。body: {template?: str, tools?: dict}"""
+    """保存工具定义和模板。"""
     try:
         body = await request.json()
     except Exception:
@@ -381,10 +418,31 @@ async def api_save_tool_config(request: Request):
     return {"ok": True, "template": data.get("template", "")[:80]+"…", "tool_count": len(data.get("tools", {}))}
 
 
+@app.get("/api/config/terminal")
+async def api_get_terminal():
+    """获取当前终端类型。"""
+    cfg = config.load_config()
+    return {"terminal": cfg.get("terminal", "powershell")}
+
+
+@app.post("/api/config/terminal")
+async def api_set_terminal(request: Request):
+    """设置终端类型。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    terminal = body.get("terminal", "powershell")
+    if terminal not in ("cmd", "powershell", "bash"):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "terminal must be cmd/powershell/bash"})
+    config.update_config(terminal=terminal)
+    return {"ok": True, "terminal": terminal}
+
+
 @app.post("/api/tool-config/init")
 async def api_init_tools(request: Request):
-    """发送初始化消息给 DeepSeek（建立游戏语境）。"""
-    cfg = config.load_config()
+    """发送初始化消息给 DeepSeek。"""
+    cfg = accounts.get_account_config()
     if not cfg.get("token"):
         return JSONResponse(status_code=401, content={"ok": False, "error": "未登录"})
     if not cfg.get("session_id"):
@@ -394,22 +452,9 @@ async def api_init_tools(request: Request):
     print(f"[ToolInit] 发送初始化消息（{len(prompt)} 字符）到 session {cfg['session_id'][:16]}...")
 
     ds_messages = [{"role": "user", "content": prompt}]
-    ds_model = "deepseek-default"
-    model_type = "default"
-
-    old_mid = sess.get_last_message_id()
-    if old_mid:
-        sess.clear_last_message_id()
-        print(f"[ToolInit] 清除了旧续接点 parent_message_id={old_mid}")
-
     ds_stream = ds_api.chat_completion(
-        cfg=cfg,
-        messages=ds_messages,
-        model=ds_model,
-        model_type=model_type,
-        thinking_enabled=True,
-        search_enabled=False,
-        stream=True,
+        cfg=cfg, messages=ds_messages, model="deepseek-default", model_type="default",
+        thinking_enabled=True, search_enabled=False, stream=True,
     )
 
     full_content = ""
@@ -419,22 +464,13 @@ async def api_init_tools(request: Request):
             full_content += val if isinstance(val, str) else ""
         elif etype == "message_id":
             got_message_id = val
-            print(f"[ToolInit] DeepSeek 返回 message_id={val}")
 
     preview = (full_content[:100].replace('\n', ' ') + '…') if len(full_content) > 100 else full_content.replace('\n', ' ')
-    print(f"[ToolInit] 响应：{preview}")
-
     if got_message_id:
         sess.set_last_message_id(got_message_id)
         sess.increment_message_count()
 
-    return {
-        "ok": True,
-        "message": "初始化消息已发送",
-        "response_preview": preview[:200],
-        "response_length": len(full_content),
-        "message_id": got_message_id,
-    }
+    return {"ok": True, "message": "初始化消息已发送", "response_preview": preview[:200], "message_id": got_message_id}
 
 
 # ── Session 管理 API ──────────────────────────────────────
@@ -442,20 +478,20 @@ async def api_init_tools(request: Request):
 
 @app.get("/api/sessions")
 async def api_list_sessions():
-    """列出所有 session（含 active 标记 + message_count / last_used）。"""
+    """列出所有 session。"""
     return {"sessions": sess.list_sessions()}
 
 
 @app.post("/api/sessions/new")
 async def api_new_session(request: Request):
-    """新建 session（调 DeepSeek /chat_session/create，注册到列表并激活）。"""
+    """新建 session。"""
     try:
         body = await request.json()
     except Exception:
         body = {}
     label = body.get("label", "")
 
-    cfg = config.load_config()
+    cfg = accounts.get_account_config()
     if not cfg.get("token"):
         return JSONResponse(status_code=401, content={"ok": False, "error": "未登录"})
 
@@ -470,18 +506,162 @@ async def api_new_session(request: Request):
 
 @app.post("/api/sessions/activate")
 async def api_activate_session(request: Request):
-    """切换 active session（写 sessions.json + config.json，下次请求走新 session）。"""
+    """切换 active session。"""
     try:
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
-
     sid = body.get("session_id", "")
     if not sid:
         return JSONResponse(status_code=400, content={"ok": False, "error": "session_id required"})
-
     ok = sess.activate_session(sid)
     return {"ok": ok, "session_id": sid if ok else None, "error": None if ok else "session 不存在"}
+
+
+@app.post("/api/sessions/delete")
+async def api_delete_session(request: Request):
+    """删除 session。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    sid = body.get("session_id", "")
+    if not sid:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "session_id required"})
+    ok, err = sess.delete_session(sid)
+    if not ok:
+        return JSONResponse(status_code=400, content={"ok": False, "error": err})
+    return {"ok": True, "session_id": sid}
+
+
+@app.post("/api/sessions/import")
+async def api_import_session(request: Request):
+    """手动导入 session。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    sid = body.get("session_id", "").strip()
+    if not sid:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "session_id required"})
+    label = body.get("label", "").strip()
+    last_mid = body.get("last_message_id")
+    if last_mid not in (None, ""):
+        try:
+            last_mid = int(last_mid)
+        except (ValueError, TypeError):
+            return JSONResponse(status_code=400, content={"ok": False, "error": "last_message_id 必须是整数或留空"})
+    else:
+        last_mid = None
+    activate = bool(body.get("activate", False))
+    sess.register_session(sid, label=label)
+    if last_mid is not None or body.get("clear_mid"):
+        sess.set_specific_last_message_id(sid, last_mid)
+    if activate:
+        sess.activate_session(sid)
+    return {"ok": True, "session_id": sid, "label": label, "last_message_id": last_mid, "activated": activate}
+
+
+@app.post("/api/sessions/edit-mid")
+async def api_edit_session_mid(request: Request):
+    """编辑 session 续接点。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    sid = body.get("session_id", "").strip()
+    last_mid = body.get("last_message_id")
+    if not sid:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "session_id required"})
+    if last_mid in (None, ""):
+        last_mid = None
+    else:
+        try:
+            last_mid = int(last_mid)
+        except (ValueError, TypeError):
+            return JSONResponse(status_code=400, content={"ok": False, "error": "last_message_id 必须是整数或留空"})
+    ok = sess.set_specific_last_message_id(sid, last_mid)
+    if not ok:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "session 不存在"})
+    return {"ok": True, "session_id": sid, "last_message_id": last_mid}
+
+
+# ── 审批 API ──────────────────────────────────────
+
+
+@app.get("/api/approval/pending")
+async def api_approval_pending():
+    """列出待审批项。"""
+    return {"items": approval.queue.list_pending(), "enabled": approval.queue.enabled, "transparent": approval.queue.transparent}
+
+
+@app.get("/api/approval/history")
+async def api_approval_history(limit: int = 50):
+    """列出已审批历史。"""
+    return {"items": approval.queue.list_history(limit)}
+
+
+@app.post("/api/approval/toggle")
+async def api_approval_toggle():
+    """开启/关闭审批拦截。"""
+    approval.queue.set_enabled(not approval.queue.enabled)
+    return {"ok": True, "enabled": approval.queue.enabled}
+
+
+@app.post("/api/approval/transparent")
+async def api_approval_transparent():
+    """开启/关闭透明拦截模式（直接放行但留痕）。"""
+    approval.queue.set_transparent(not approval.queue.transparent)
+    return {"ok": True, "transparent": approval.queue.transparent}
+
+
+@app.post("/api/approval/approve/{item_id}")
+async def api_approval_approve(item_id: int):
+    """放行指定项。"""
+    ok = approval.queue.approve(item_id)
+    return {"ok": ok}
+
+
+@app.post("/api/approval/reject/{item_id}")
+async def api_approval_reject(item_id: int):
+    """拒绝指定项。"""
+    ok = approval.queue.reject(item_id, error="用户拒绝")
+    return {"ok": ok}
+
+
+@app.post("/api/approval/edit/{item_id}")
+async def api_approval_edit(item_id: int, request: Request):
+    """编辑待审批项的 body。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    edited_body = body.get("body")
+    ok = approval.queue.edit_item(item_id, edited_body)
+    if not ok:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "item 不存在"})
+    return {"ok": True}
+
+
+@app.post("/api/approval/approve-all")
+async def api_approval_approve_all():
+    """放行所有。"""
+    count = approval.queue.approve_all()
+    return {"ok": True, "count": count}
+
+
+@app.post("/api/approval/clear")
+async def api_approval_clear():
+    """清空所有。"""
+    approval.queue.clear_all()
+    return {"ok": True}
+
+
+@app.post("/api/debug/intercept/clear")
+async def api_clear_intercept():
+    """清空拦截记录。"""
+    approval.queue.clear_history()
+    return {"ok": True}
 
 
 # ── 管理页面 ──────────────────────────────────────────
@@ -489,10 +669,49 @@ async def api_activate_session(request: Request):
 
 @app.get("/admin")
 async def admin():
-    """管理控制台页面。"""
+    """概览页。"""
     cfg = config.load_config()
     usage = sess.get_usage_status() if cfg.get("session_id") else {}
-    return HTMLResponse(render_admin_html(cfg, usage))
+    from admin_page import render_overview
+    return HTMLResponse(render_overview(cfg, usage))
+
+
+@app.get("/admin/accounts")
+async def admin_accounts():
+    """账号管理页。"""
+    from admin_page import render_accounts
+    return HTMLResponse(render_accounts())
+
+
+@app.get("/admin/sessions")
+async def admin_sessions():
+    """会话管理页。"""
+    from admin_page import render_sessions
+    return HTMLResponse(render_sessions())
+
+
+@app.get("/admin/rules")
+async def admin_rules():
+    """规则管理页。"""
+    from admin_page import render_rules
+    return HTMLResponse(render_rules())
+
+
+@app.get("/admin/tools")
+async def admin_tools():
+    """工具配置页。"""
+    from admin_page import render_tools
+    return HTMLResponse(render_tools())
+
+
+@app.get("/admin/debug")
+async def admin_debug():
+    """调试拦截页。"""
+    from admin_page import render_debug
+    return HTMLResponse(render_debug())
+
+
+@app.get("/")
 async def root():
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url="/admin")
@@ -500,38 +719,44 @@ async def root():
 
 @app.post("/login")
 async def login(request: Request):
-    """登录 DeepSeek 并创建持久会话。"""
+    """登录 DeepSeek（兼容旧接口）。"""
     try:
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
-
     login_type = body.get("login_type", "email")
     password = body.get("password", "")
     account = body.get("account", "") or body.get("email", "") or body.get("mobile", "")
     if not account or not password:
         return JSONResponse(status_code=400, content={"ok": False, "error": "account and password required"})
-
-    result = ds_api.login(login_type, account, password)
+    result = ds_login(login_type, account, password)
     if result:
         return {"ok": True, "message": "Login successful, session created"}
     else:
         return JSONResponse(status_code=401, content={"ok": False, "error": "Login failed. Check console for details."})
 
 
-# ── v2 架构：新 react_loop + Provider ───────────────────────
+# ── Provider 初始化 ───────────────────────────────
 
 
-# 当前使用的 provider（启动时由环境变量决定）
-# DEEPSEEK_PROVIDER=true → 用真实 DeepSeek，否则用 BashListProvider（mock）
 import os as _os
-if _os.environ.get("DEEPSEEK_PROVIDER", "").lower() in ("1", "true", "yes"):
+if _os.environ.get("DEEPSEEK_PROVIDER", "").lower() in ("0", "false", "no"):
+    from providers.base import Event
+    from typing import AsyncIterator
+
+    class BashListProvider:
+        """Mock provider for testing."""
+        async def chat(self, messages: list[dict], **kwargs) -> AsyncIterator[Event]:
+            yield Event(type="content", val="Hello! I'm a mock provider. ")
+            yield Event(type="content", val="Set DEEPSEEK_PROVIDER=true to use the real API.")
+            yield Event(type="done", val=None)
+
+    _CURRENT_PROVIDER = BashListProvider()
+    print(f"[Provider] BashListProvider (mock)")
+else:
     from providers.deepseek import DeepSeekProvider
     _CURRENT_PROVIDER = DeepSeekProvider()
     print(f"[Provider] DeepSeekProvider (真实 API)")
-else:
-    _CURRENT_PROVIDER = BashListProvider()
-    print(f"[Provider] BashListProvider (mock, DEEPSEEK_PROVIDER=true 切换到真实 API)")
 
 
 # ── 启动 ──────────────────────────────────────────────
@@ -539,21 +764,19 @@ else:
 if __name__ == "__main__":
     import uvicorn
 
-    cfg = config.load_config()
-    port = cfg.get("port", 8080)
+    # 尝试从旧版 config 导入账号
+    accounts.import_from_config()
 
-    print(f"=== DeepSeek Web Agent Proxy ===")
+    cfg = config.load_config()
+    port = cfg.get("port", 48391)
+
+    print(f"=== DeepSeek Web Agent Proxy v0.3.0 ===")
     print(f"Listening on http://127.0.0.1:{port}")
-    print(f"Authenticated: {bool(cfg.get('token'))}")
-    print(f"Session: {cfg.get('session_id', 'N/A')[:16]}...")
     print()
     print("Endpoints:")
-    print(f"  POST /v1/chat/completions  →  OpenAI Chat API (需要审批)")
-    print(f"  POST /login                →  Login to DeepSeek")
+    print(f"  POST /v1/chat/completions  →  OpenAI Chat API")
+    print(f"  GET  /admin                →  Admin Panel")
     print(f"  GET  /health               →  Health check")
-    print(f"  GET  /api/pending           →  待审批列表")
-    print(f"  POST /api/approve/{'{id}'}    →  放行请求")
-    print(f"  POST /api/reject/{'{id}'}    →  拒绝请求")
     print()
 
     uvicorn.run(app, host="0.0.0.0", port=port)
