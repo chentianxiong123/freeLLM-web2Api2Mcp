@@ -27,16 +27,18 @@ def _get_shell():
         return ["powershell", "-Command"]
 
 
-def execute_bash(command: str, timeout: int = 30) -> str:
+def execute_bash(command: str, timeout: int = 30, cwd: str = None) -> str:
     """执行 shell 命令，返回 stdout+stderr。"""
     shell = _get_shell()
+    if cwd is None:
+        cwd = os.getcwd()
     try:
         result = subprocess.run(
             shell + [command],
             capture_output=True,
             text=True,
             timeout=timeout,
-            cwd=os.path.expanduser("~"),
+            cwd=cwd,
         )
         output = result.stdout
         if result.stderr:
@@ -93,13 +95,13 @@ def edit_file(file_path: str, old_string: str, new_string: str) -> str:
         return f"[错误] {e}"
 
 
-def execute_tool(name: str, arguments: dict) -> str:
+def execute_tool(name: str, arguments: dict, cwd: str = None) -> str:
     """执行单个工具调用，返回结果文本。"""
     try:
         if name == "Bash":
             cmd = arguments.get("command", "")
             timeout = int(arguments.get("timeout", 30))
-            return execute_bash(cmd, timeout=timeout)
+            return execute_bash(cmd, timeout=timeout, cwd=cwd)
         elif name == "Read":
             fp = arguments.get("file_path", "")
             offset = arguments.get("offset")
@@ -124,12 +126,12 @@ def execute_tool(name: str, arguments: dict) -> str:
         return f"[错误] 执行 {name} 失败: {e}"
 
 
-def execute_tool_calls(tool_calls: list[dict]) -> list[str]:
+def execute_tool_calls(tool_calls: list[dict], cwd: str = None) -> list[str]:
     """执行多个工具调用，返回结果列表（按顺序）。"""
     results = []
     for tc in tool_calls:
         name = tc.get("name", "")
         args = tc.get("arguments", {})
-        result = execute_tool(name, args)
+        result = execute_tool(name, args, cwd=cwd)
         results.append(result)
     return results

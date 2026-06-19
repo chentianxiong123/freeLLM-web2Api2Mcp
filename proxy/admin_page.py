@@ -683,11 +683,30 @@ async function refreshToolConfig() {
         var r = await fetch('/api/tool-config');
         var d = await r.json();
         var tools = d.tools || {};
-        var template = d.template || '';
+        var sections = d.sections || [];
         var names = Object.keys(tools);
-        $('toolConfigStatus').textContent = '(' + names.length + ' 个工具)';
+        $('toolConfigStatus').textContent = '(' + names.length + ' 个工具, ' + sections.length + ' 个环节)';
 
-        // 根据终端类型生成示例
+        // sections UI
+        var sectionsHtml = sections.map((sec, i) => {
+            var isTools = sec.id === 'tools';
+            var content = sec.content || '';
+            return '<div style="padding:8px;background:#fafafa;border-radius:4px;margin-bottom:6px;border-left:2px solid ' + (sec.enabled ? '#1677ff' : '#d9d9d9') + '">'
+                + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+                + '<label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">'
+                + '<input type="checkbox" id="sec_chk_' + i + '" ' + (sec.enabled ? 'checked' : '') + ' onchange="toggleSection(' + i + ')">'
+                + '<span style="font-weight:600">' + escapeHtml(sec.title || sec.id) + '</span>'
+                + '</label>'
+                + '<span style="font-size:10px;color:#999">#' + sec.id + '</span>'
+                + '<span style="font-size:10px;color:' + (sec.enabled ? '#52c41a' : '#999') + '">' + (sec.enabled ? '✅ 开启' : '⛔ 关闭') + '</span>'
+                + '</div>'
+                + (isTools
+                    ? '<div style="font-size:10px;color:#888;padding:4px 6px;background:#f0f0f0;border-radius:3px">自动从工具定义生成</div>'
+                    : '<textarea id="sec_txt_' + i + '" rows="2" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:11px">' + escapeHtml(content) + '</textarea>')
+                + '</div>';
+        }).join('');
+
+        // 工具列表
         var toolHtml = names.map(name => {
             var spec = tools[name];
             var req = (spec.required||[]).join(', ') || '无';
@@ -702,11 +721,22 @@ async function refreshToolConfig() {
         }).join('');
 
         $('toolConfigCard').innerHTML =
-            '<div style="margin-bottom:6px;font-size:11px;color:#888">' + names.length + ' 个工具 · 模板 ' + template.length + ' 字符</div>'
-            + '<div style="margin-bottom:6px"><b style="font-size:11px">📝 模板（发给 DeepSeek 的 system prompt）</b>'
-            + '<textarea id="tmplEditor" rows="4" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:11px;margin-top:4px">' + escapeHtml(template) + '</textarea>'
-            + '<div style="text-align:right;margin-top:4px"><button class="btn-ghost btn-sm" onclick="saveToolConfig()">💾 保存</button></div></div>'
+            '<div style="margin-bottom:6px;font-size:11px;color:#888">' + names.length + ' 个工具 · ' + sections.length + ' 个环节</div>'
+            + '<div style="margin-bottom:8px"><b style="font-size:11px">📝 初始化消息环节（可开关/编辑，按顺序拼接）</b></div>'
+            + sectionsHtml
+            + '<div style="display:flex;gap:6px;margin-bottom:8px">'
+            + '<button class="btn-ghost btn-sm" onclick="saveSections()">💾 保存环节</button>'
+            + '<button class="btn-ghost btn-sm" onclick="previewInit()">👁 预览</button>'
+            + '</div>'
+            + '<div style="margin-bottom:8px;padding:8px;background:#fffbe6;border:1px solid #ffe58f;border-radius:4px;font-size:11px">'
+            + '<b>📂 初始化参数（初始化时填入）</b>'
+            + '<div style="display:flex;gap:8px;margin-top:4px">'
+            + '<input id="initWorkDir" placeholder="工作目录（如 D:\\my-project）" style="flex:1">'
+            + '<input id="initProjectCtx" placeholder="项目背景（可选，如 Vue3 + TS）" style="flex:2">'
+            + '</div>'
+            + '</div>'
             + '<div><b style="font-size:11px">🔧 工具定义</b></div>' + toolHtml
+            + '<div id="initPreview" style="margin-top:6px"></div>'
             + '<div id="initMsg" style="margin-top:6px"></div>';
     } catch(e) { $('toolConfigCard').innerHTML = '<div class="empty">加载失败</div>'; }
 }
@@ -808,22 +838,69 @@ async function changeTerminal() {
     } catch(e) { $('toolConfigCard').innerHTML = '<div class="empty">加载失败</div>'; }
 }
 
-async function saveToolConfig() {
-    var tmpl = $('tmplEditor').value;
-    if (!tmpl.trim()) { alert('模板不能为空'); return; }
+function toggleSection(i) {
+    var chk = $('sec_chk_' + i);
+    var secs = getSectionsFromUI();
+    if (secs[i]) secs[i].enabled = chk.checked;
+    saveSectionsToServer(secs);
+}
+
+function getSectionsFromUI() {
+    var secs = [];
+    var i = 0;
+    while ($('sec_chk_' + i)) {
+        var sec = {
+            id: '',
+            enabled: $('sec_chk_' + i).checked,
+            title: '',
+        };
+        var txt = $('sec_txt_' + i);
+        sec.content = txt ? txt.value : '';
+        i++;
+        secs.push(sec);
+    }
+    return secs;
+}
+
+async function saveSectionsToServer(secs) {
     try {
-        var r = await fetch('/api/tool-config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({template:tmpl}) });
+        var r = await fetch('/api/tool-config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({sections:secs}) });
         var d = await r.json();
         if (d.ok) { showToast('✅ 已保存', true); refreshToolConfig(); }
+        else showToast('❌ 保存失败', false);
     } catch(e) { showToast('❌ ' + e.message, false); }
 }
 
-async function initTools() {
-    if (!confirm('发送初始化消息到 DeepSeek？')) return;
+async function saveSections() {
+    var secs = getSectionsFromUI();
+    await saveSectionsToServer(secs);
+}
+
+async function previewInit() {
+    var wd = $('initWorkDir').value || '.';
+    var pc = $('initProjectCtx').value || '';
     try {
-        var r = await fetch('/api/tool-config/init', {method:'POST'});
+        var r = await fetch('/api/tool-config/init', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({working_directory: wd, project_context: pc, preview: true}) });
         var d = await r.json();
-        if (d.ok) showToast('✅ 已发送', true);
+        if (d.prompt) {
+            $('initPreview').innerHTML = '<div style="margin-top:8px;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:4px">'
+                + '<b style="font-size:11px;color:#389e0d">👁 预览（共 ' + d.prompt.length + ' 字符）</b>'
+                + '<pre style="margin-top:4px;padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;font-size:10px;white-space:pre-wrap;max-height:400px;overflow-y:auto">' + escapeHtml(d.prompt) + '</pre>'
+                + '</div>';
+        } else {
+            $('initPreview').innerHTML = '<div class="empty">预览生成失败</div>';
+        }
+    } catch(e) { $('initPreview').innerHTML = '<div class="empty">' + escapeHtml(e.message) + '</div>'; }
+}
+
+async function initTools() {
+    var wd = $('initWorkDir').value || '.';
+    var pc = $('initProjectCtx').value || '';
+    if (!confirm('发送初始化消息到 DeepSeek？\n工作目录: ' + (wd || '.') + '\n项目背景: ' + (pc || '(无)') + '\n\n先预览确认？')) return;
+    try {
+        var r = await fetch('/api/tool-config/init', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({working_directory: wd, project_context: pc}) });
+        var d = await r.json();
+        if (d.ok) showToast('✅ 已发送（' + (d.message_id ? 'mid='+d.message_id : '') + '）', true);
         else showToast('❌ ' + (d.error||'失败'), false);
     } catch(e) { showToast('❌ ' + e.message, false); }
 }

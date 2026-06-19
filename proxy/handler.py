@@ -58,7 +58,7 @@ def build_ds_input(body: dict) -> ChatRequest:
             print(f"[build_ds_input]   >>> TOOL MESSAGE FOUND <<<")
 
     if has_tool:
-        # ── react 续接：直接返回工具结果，按顺序标号 ──
+        # ── react 续接：直接返回工具结果，按顺序 ──
         tool_msgs = []
         for m in msgs:
             if m.get("role") != "tool":
@@ -399,6 +399,7 @@ async def react_loop(
     request_id: str,
     model: str,
     tools_schema: list[dict] | None = None,
+    cwd: str | None = None,
 ) -> dict:
     """React 循环：发送消息给 DS，如果响应含 tool_calls 则本地执行并续接。
 
@@ -447,7 +448,7 @@ async def react_loop(
 
         # 有 tool_calls → 本地执行
         print(f"[react_loop] got {len(tool_calls)} tool_calls, executing locally")
-        results = local_exec(tool_calls)
+        results = local_exec(tool_calls, cwd=cwd)
 
         # 构造 DS 续接消息：把工具结果作为 user 消息发回，不标号
         result_text = "\n\n".join(results)

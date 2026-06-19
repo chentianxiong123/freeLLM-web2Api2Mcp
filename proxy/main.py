@@ -164,10 +164,14 @@ async def chat_completions(request: Request):
 
     # 使用编辑后的 user_content（如果有）
     final_user_content = chat_req.user_content
+    working_directory = None
     if req_result.get("edited") and req_result.get("body"):
         edited = req_result["body"]
-        if isinstance(edited, dict) and "user_content" in edited:
-            final_user_content = edited["user_content"]
+        if isinstance(edited, dict):
+            if "user_content" in edited:
+                final_user_content = edited["user_content"]
+            if "working_directory" in edited:
+                working_directory = edited["working_directory"]
 
     resp_body = await react_loop(
         _CURRENT_PROVIDER,
@@ -175,6 +179,7 @@ async def chat_completions(request: Request):
         request_id=request_id,
         model=model,
         tools_schema=tools,
+        cwd=working_directory,
     )
 
     duration_ms = (time.time() - t0) * 1000
@@ -402,20 +407,21 @@ async def api_test_rules(request: Request):
 
 @app.get("/api/tool-config")
 async def api_get_tool_config():
-    """获取工具定义列表 + 模板。"""
+    """获取工具定义列表 + 环节配置。"""
     cfg = tool_config.get_config()
-    return {"template": cfg.get("template", ""), "tools": cfg.get("tools", {})}
+    return {"sections": cfg.get("sections", []), "tools": cfg.get("tools", {})}
 
 
 @app.post("/api/tool-config")
 async def api_save_tool_config(request: Request):
-    """保存工具定义和模板。"""
+    """保存工具定义和环节。"""
     try:
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
     data = tool_config.update_config(body)
-    return {"ok": True, "template": data.get("template", "")[:80]+"…", "tool_count": len(data.get("tools", {}))}
+    sec_count = len(data.get("sections", []))
+    return {"ok": True, "sections": sec_count, "tool_count": len(data.get("tools", {}))}
 
 
 @app.get("/api/config/terminal")
@@ -441,15 +447,34 @@ async def api_set_terminal(request: Request):
 
 @app.post("/api/tool-config/init")
 async def api_init_tools(request: Request):
-    """发送初始化消息给 DeepSeek。"""
+    """发送初始化消息给 DeepSeek。携带工作目录、项目背景。"""
     cfg = accounts.get_account_config()
     if not cfg.get("token"):
         return JSONResponse(status_code=401, content={"ok": False, "error": "未登录"})
     if not cfg.get("session_id"):
         return JSONResponse(status_code=400, content={"ok": False, "error": "没有 active session"})
 
-    prompt = tool_config.build_init_prompt()
-    print(f"[ToolInit] 发送初始化消息（{len(prompt)} 字符）到 session {cfg['session_id'][:16]}...")
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    working_directory = body.get("working_directory", "") or body.get("cwd", "")
+    project_context = body.get("project_context", "")
+    preview_only = body.get("preview", False)
+
+    prompt = tool_config.build_init_prompt(working_directory=working_directory)
+
+    # 项目背景追加
+    if project_context:
+        prompt += f"\n\n项目背景：{project_context}"
+
+    print(f"[ToolInit] 发送初始化消息（{len(prompt)} 字符, wd={working_directory or '(默认)'}）")
+
+    # 预览模式：只返回不发送
+    if preview_only:
+        return {"ok": True, "prompt": prompt, "length": len(prompt)}
 
     ds_messages = [{"role": "user", "content": prompt}]
     ds_stream = ds_api.chat_completion(
