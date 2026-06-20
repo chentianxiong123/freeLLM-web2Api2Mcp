@@ -5,18 +5,31 @@ Rule structure:
 {
     "id": "r001",
     "name": "SUGGESTION MODE",
+    "match_type": "substring",   # "substring" | "regex"
+    "scope": "request",          # "request" | "response"
     "pattern": "suggestion mode",
+    "action": "block",           # "block" | "strip"
     "enabled": true,
     "note": "Description...",
     "created_at": 1781543900,
     "updated_at": 1781543900
 }
 
-Matching: simple substring match on user message text (case-insensitive).
-If any enabled rule's pattern is found, the request is blocked.
+作用域：
+  - request: 拦截用户请求，不发给 DS
+  - response: 过滤 DS 返回的内容
+
+匹配方式：
+  - substring: pattern in text（大小写不敏感）
+  - regex: re.search(pattern, text)（大小写不敏感）
+
+响应过滤动作：
+  - block: 整个响应返回空
+  - strip: 只删除匹配的内容，其他保留
 """
 
 import json
+import re
 import time
 import threading
 from pathlib import Path
@@ -73,10 +86,23 @@ def add_rule(rule: dict) -> dict:
     next_num = (max(existing_nums) + 1) if existing_nums else 1
     new_id = f"r{next_num:03d}"
 
+    match_type = rule.get("match_type", "substring")
+    if match_type not in ("substring", "regex"):
+        match_type = "substring"
+    scope = rule.get("scope", "request")
+    if scope not in ("request", "response"):
+        scope = "request"
+    action = rule.get("action", "block")
+    if action not in ("block", "strip"):
+        action = "block"
+
     now = int(time.time())
     new_rule = {
         "id": new_id,
         "name": rule.get("name", "").strip() or "未命名规则",
+        "match_type": match_type,
+        "scope": scope,
+        "action": action,
         "pattern": rule.get("pattern", ""),
         "enabled": bool(rule.get("enabled", True)),
         "note": rule.get("note", ""),
@@ -91,11 +117,21 @@ def add_rule(rule: dict) -> dict:
 def update_rule(rule_id: str, patch: dict) -> dict | None:
     data = _load()
     rules = data.setdefault("rules", [])
+    valid_match_types = ("substring", "regex")
+    valid_scopes = ("request", "response")
+    valid_actions = ("block", "strip")
     for r in rules:
         if r.get("id") == rule_id:
-            for k in ("name", "pattern", "enabled", "note"):
+            for k in ("name", "match_type", "scope", "action", "pattern", "enabled", "note"):
                 if k in patch:
-                    r[k] = patch[k]
+                    if k == "match_type" and patch[k] in valid_match_types:
+                        r[k] = patch[k]
+                    elif k == "scope" and patch[k] in valid_scopes:
+                        r[k] = patch[k]
+                    elif k == "action" and patch[k] in valid_actions:
+                        r[k] = patch[k]
+                    else:
+                        r[k] = patch[k]
             r["updated_at"] = int(time.time())
             _save(data)
             return r
@@ -129,9 +165,24 @@ DEFAULT_RULES = [
     {
         "id": "r001",
         "name": "SUGGESTION MODE",
+        "match_type": "substring",
+        "scope": "request",
+        "action": "block",
         "pattern": "suggestion mode",
         "enabled": True,
         "note": "拦截 Claude Code 的 SUGGESTION MODE 提示",
+        "created_at": 0,
+        "updated_at": 0,
+    },
+    {
+        "id": "r002",
+        "name": "SYSTEM REMINDER",
+        "match_type": "regex",
+        "scope": "request",
+        "action": "strip",
+        "pattern": r"<system-reminder>.*?</system-reminder>",
+        "enabled": True,
+        "note": "从请求中剥离 CC 注入的 system-reminder 标签",
         "created_at": 0,
         "updated_at": 0,
     },
@@ -172,18 +223,123 @@ def _extract_user_text(body: dict) -> str:
 
 
 def is_blocked(body: dict, clean_prompt: str) -> tuple[bool, dict | None]:
-    text = _extract_user_text(body)
+    """检查请求是否被拦截（只匹配 scope=request 的规则）。"""
+    text = _extract_user_text(body) + "\n" + clean_prompt
     if not text:
         return False, None
 
-    text_lower = text.lower()
     for r in list_rules():
         if not r.get("enabled", True):
+            continue
+        if r.get("scope", "request") != "request":
+            continue
+        if r.get("action", "block") != "block":
             continue
         pattern = r.get("pattern", "").strip()
         if not pattern:
             continue
-        if pattern.lower() in text_lower:
-            return True, r
+        match_type = r.get("match_type", "substring")
+
+        try:
+            if match_type == "regex":
+                if re.search(pattern, text, re.DOTALL | re.IGNORECASE):
+                    return True, r
+            else:
+                if pattern.lower() in text.lower():
+                    return True, r
+        except re.error:
+            continue
 
     return False, None
+
+
+def clean_request_content(content: str) -> tuple[str, list[dict]]:
+    """剥离请求内容中的匹配段（只匹配 scope=request, action=strip 的规则）。
+
+    不做拦截，只剥离匹配内容。用于清理 CC 注入的标签。
+    Returns: (剥离后的内容, 命中的规则列表)
+    """
+    if not content:
+        return content, []
+
+    hits = []
+    for r in list_rules():
+        if not r.get("enabled", True):
+            continue
+        if r.get("scope", "request") != "request":
+            continue
+        if r.get("action") != "strip":
+            continue
+        pattern = r.get("pattern", "").strip()
+        if not pattern:
+            continue
+        match_type = r.get("match_type", "substring")
+
+        try:
+            if match_type == "regex":
+                if not re.search(pattern, content, re.DOTALL | re.IGNORECASE):
+                    continue
+                content = re.sub(pattern, "", content, flags=re.DOTALL | re.IGNORECASE)
+            else:
+                idx = content.lower().find(pattern.lower())
+                if idx < 0:
+                    continue
+                content = content[:idx] + content[idx + len(pattern):]
+        except re.error:
+            continue
+
+        hits.append(r)
+
+    return content.strip(), hits
+
+
+def filter_response(content: str) -> tuple[str, list[dict]]:
+    """过滤 DS 返回的内容（只匹配 scope=response 的规则）。
+
+    action=block: 整个响应返回空
+    action=strip: 只删除匹配内容
+
+    Returns: (过滤后的内容, 命中的规则列表)
+    """
+    if not content:
+        return content, []
+
+    hits = []
+    for r in list_rules():
+        if not r.get("enabled", True):
+            continue
+        if r.get("scope") != "response":
+            continue
+        pattern = r.get("pattern", "").strip()
+        if not pattern:
+            continue
+        match_type = r.get("match_type", "substring")
+        action = r.get("action", "block")
+
+        try:
+            if match_type == "regex":
+                if not re.search(pattern, content, re.DOTALL | re.IGNORECASE):
+                    continue
+            else:
+                if pattern.lower() not in content.lower():
+                    continue
+        except re.error:
+            continue
+
+        hits.append(r)
+
+        if action == "block":
+            return "", hits
+        elif action == "strip":
+            try:
+                if match_type == "regex":
+                    content = re.sub(pattern, "", content, flags=re.DOTALL | re.IGNORECASE)
+                else:
+                    # substring strip: 大小写不敏感替换
+                    idx = content.lower().find(pattern.lower())
+                    if idx >= 0:
+                        content = content[:idx] + content[idx + len(pattern):]
+            except re.error:
+                pass
+
+    return content.strip(), hits

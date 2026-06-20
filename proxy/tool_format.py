@@ -15,16 +15,42 @@ DeepSeek 用 "自然语言暗语" 输出工具调用：
 依赖：调用方传入工具 schema（用于类型推断）
 """
 
+"""DeepSeek 工具调用响应解析器
+
+DeepSeek 用 "自然语言暗语" 输出工具调用：
+    工具 名称
+    key="value"
+    key2="value2"
+    工具结束
+
+我们的任务：
+1. 从 DeepSeek 完整回复中切出所有"工具块"
+2. 每个块转成 {name, arguments} 结构
+3. 残留的普通文本作为 content
+4. 多个工具块按出现顺序
+
+依赖：调用方传入工具 schema（用于类型推断）
+"""
+
 import os
 import re
 from typing import Any
 
 # 工具块匹配
-# 匹配 "工具 名称" 到 "工具结束" 中间的所有 key=value 行（兼容带/不带引号、内嵌转义、前导空白）
+# 匹配 "工具 名称" + key=value 行，不要求 "工具结束"（工具结束是 react 完成信号，可选）
+# 前瞻判断边界：下一个 "工具 名称" 或 "工具结束" 或字符串结尾
 TOOL_BLOCK_RE = re.compile(
-    r'^[ \t]*工具[ \t]+([A-Za-z_]\w*)[ \t]*$'           # 工具名行（允许 tab/空格缩进）
-    r'((?:\n[ \t]*[A-Za-z_]\w*[ \t]*=[ \t]*(?:"(?:\\.|[^"\\])*"|\S+)[ \t]*)*)'  # key=value 行（允许缩进）
-    r'\n?[ \t]*工具结束[ \t]*$',                          # 工具结束行（允许缩进）
+    r'^[ \t]*工具[ \t]+([A-Za-z_]\w*)[ \t]*\n'           # 工具名行（允许 tab/空格缩进）
+    r'((?:[ \t]*[A-Za-z_]\w*[ \t]*=[ \t]*(?:"(?:\\.|[^"\\])*"|\S+)[ \t]*(?:\n|$))*)'  # key=value 行（可选尾随 \n，兼容无 \n 结尾的情况）
+    r'(?=\n[ \t]*工具[ \t]+|'                              # 前瞻：下一个工具
+    r'\n[ \t]*工具结束[ \t]*|'                             # 或工具结束
+    r'\Z)',                                                # 或字符串结尾
+    re.MULTILINE,
+)
+
+# 独立匹配 "工具结束" 行（可选，用于检测 react 完成信号）
+TOOL_END_RE = re.compile(
+    r'^[ \t]*工具结束[ \t]*\n?',
     re.MULTILINE,
 )
 
@@ -157,8 +183,10 @@ def parse_tool_blocks(text: str, tools_schema: list[dict] | None = None) -> tupl
             "arguments": _expand_tilde(_coerce_arguments(raw_args, schema)),
         })
 
-    # 剩余文本：把所有工具块 + 前后紧邻空行去掉
+    # 去掉所有工具块
     remaining = TOOL_BLOCK_RE.sub("", text)
+    # 去掉 "工具结束"（可选 react 完成信号）
+    remaining = TOOL_END_RE.sub("", remaining)
     # 把连续空行压成单个空行
     remaining = re.sub(r'\n{3,}', '\n\n', remaining).strip()
 
@@ -186,7 +214,7 @@ def json_dumps(obj: Any) -> str:
 # ── 单元测试（仅直接运行时执行）─────────────────────────
 
 if __name__ == "__main__":
-    # 模拟一个 DeepSeek 回复
+    # 模拟 DeepSeek 回复（含无 \n 结尾 + 无工具结束的 edge case）
     sample = """好的，我先看看。
 
 工具 Bash
@@ -201,6 +229,10 @@ limit="6"
 工具结束
 
 读取完毕。
+
+工具 Write
+file_path="C:/tmp/test.txt"
+content="hello"
 """
     # 工具 schema 用于类型推断
     schema = [

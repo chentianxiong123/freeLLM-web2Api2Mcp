@@ -17,7 +17,7 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 
-from handler import stream_chat_to_sse, build_ds_input, collect_response, react_loop
+from handler import build_ds_input, collect_response
 import approval
 from login import login as ds_login
 from debug_interceptor import interceptor
@@ -53,6 +53,30 @@ async def debug_middleware(request: Request, call_next):
     except Exception:
         pass
 
+    # ── 落地原始 body 到 debug_requests/，跳过 housekeeping ──
+    if path == "/v1/chat/completions" and isinstance(body, dict):
+        try:
+            from handler import check_housekeeping as _chk_hk
+            if _chk_hk(body):
+                print(f"[DEBUG-DUMP] SKIPPED housekeeping request")
+            else:
+                import os as _os_dl
+                from datetime import datetime as _dt_dl
+                _dl_dir = _os_dl.path.join(_os_dl.path.dirname(_os_dl.path.abspath(__file__)), "debug_requests")
+                _os_dl.makedirs(_dl_dir, exist_ok=True)
+                _ts = _dt_dl.now().strftime("%Y%m%dT%H%M%S")
+                _dl_name = f"{_ts}_{uuid.uuid4().hex[:6]}.json"
+                with open(_os_dl.path.join(_dl_dir, _dl_name), "w", encoding="utf-8") as _f:
+                    json.dump({
+                        "ts": _ts,
+                        "path": path,
+                        "headers": {k: v for k, v in request.headers.items() if k.lower() not in ("authorization", "cookie")},
+                        "body": body,
+                    }, _f, ensure_ascii=False, indent=2)
+                print(f"[DEBUG-DUMP] wrote {_dl_name} (body.messages={len(body.get('messages', []))})")
+        except Exception as _e_dl:
+            print(f"[DEBUG-DUMP] FAILED: {_e_dl}")
+
     rec = interceptor.start_request(
         method=request.method,
         path=path,
@@ -62,9 +86,15 @@ async def debug_middleware(request: Request, call_next):
 
     try:
         response = await call_next(request)
+        content_type = response.headers.get("content-type", "")
+        # SSE 流式响应 — 跳过 body 读取
+        if "text/event-stream" in content_type:
+            interceptor.finish_request(rec, status=response.status_code, body="<streaming>", headers=dict(response.headers))
+            return response
+
         # 读取响应 body（只对 JSON 响应）
         resp_body = None
-        if "application/json" in response.headers.get("content-type", ""):
+        if "application/json" in content_type:
             resp_body = b""
             async for chunk in response.body_iterator:
                 resp_body += chunk if isinstance(chunk, bytes) else chunk.encode()
@@ -108,9 +138,18 @@ async def debug_middleware(request: Request, call_next):
 # ── 路由 ──────────────────────────────────────────────
 
 
+def _formatted_skip(skip_resp: dict):
+    """返回 skip 响应（JSON）。"""
+    return JSONResponse(content=skip_resp)
+
+
+_req_counter = 0
+_dedup_cache: dict[str, float] = {}  # key → timestamp
+_DEDUP_TTL = 15  # 秒
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    """OpenAI Chat Completions 端点。全部走非流式。"""
+    """OpenAI Chat Completions 端点。支持流式和非流式。"""
     try:
         body = await request.json()
     except Exception:
@@ -118,25 +157,69 @@ async def chat_completions(request: Request):
             "error": {"message": "Invalid JSON", "type": "invalid_request_error"},
         })
 
+    # ── CC 先发 stream，超时后发 non-stream fallback，只认 non-stream 响应 ──
+    # → stream 直接返回空（CC 忽略），non-stream 做真正处理
+    is_stream = body.get("stream", False)
+    if is_stream:
+        print(f"[STREAM-SKIP] CC stream request → return empty (CC ignores it)")
+        _empty_resp = {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": body.get("model", "deepseek-v4-flash"),
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+        async def _empty_sse():
+            yield f"data: {json.dumps(_empty_resp, ensure_ascii=False)}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+        return StreamingResponse(
+            _empty_sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    global _req_counter
+    _req_counter += 1
+    rid = f"R{_req_counter}"
     request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    model = body.get("model", "deepseek-v4-flash")
+    model = sess.get_active_model()
     tools = body.get("tools", []) or []
 
-    # 调试：打印 body 结构
     msgs = body.get("messages", [])
-    print(f"[chat_completions] model={model}, messages_count={len(msgs)}, tools_count={len(tools)}")
-    for i, m in enumerate(msgs):
-        role = m.get("role", "?")
-        content = m.get("content", "")
-        preview = content[:150].replace('\n', ' ') if isinstance(content, str) else str(content)[:150]
-        print(f"[chat_completions]   [{i}] role={role}, content_preview={preview}")
-        if role == "tool":
-            print(f"[chat_completions]   >>> TOOL ROLE IN BODY <<<")
+    last_content = ""
+    for m in reversed(msgs):
+        c = m.get("content", "")
+        if isinstance(c, str):
+            last_content = c[:100]
+            break
+        elif isinstance(c, list):
+            for b in reversed(c):
+                if isinstance(b, dict) and b.get("type") == "text":
+                    last_content = b.get("text", "")[:100]
+                    break
+            if last_content:
+                break
+    print(f"[{rid}] === REQ model={model} msgs={len(msgs)} last={last_content.replace(chr(10),' ')}")
 
     # 预转换：提取用户消息
     chat_req = build_ds_input(body)
 
-    # 审批：请求（含转换结果）
+    # 拦截
+    from handler import check_housekeeping, check_rules, make_skip_response
+    if check_housekeeping(body):
+        print(f"[{rid}] BLOCKED: housekeeping")
+        return _formatted_skip(make_skip_response(model, request_id, "housekeeping"))
+
+    blocked, hit_rule = check_rules(body)
+    if blocked:
+        rule_name = hit_rule.get("name", "?") if hit_rule else "?"
+        print(f"[{rid}] BLOCKED: rule={rule_name}")
+        return _formatted_skip(make_skip_response(model, request_id, f"rule:{rule_name}"))
+
+    print(f"[{rid}] PASSED checks, calling DS")
+
+    # 审批：请求
     req_result = await approval.queue.intercept_request(
         method="POST", path="/v1/chat/completions",
         body=body, headers=dict(request.headers),
@@ -152,19 +235,17 @@ async def chat_completions(request: Request):
             "error": {"message": req_result.get("error", "请求被拒绝"), "type": "permission_error"},
         })
 
-    # 获取当前活跃账号的 config
+    # 检查账号
     cfg = accounts.get_account_config()
     if not cfg.get("token"):
         return JSONResponse(status_code=401, content={
             "error": {"message": "No active account", "type": "authentication_error"},
         })
 
-    # 调用 Provider 收集完整响应（React 循环：本地执行 DS 的工具调用）
     t0 = time.time()
 
-    # 使用编辑后的 user_content（如果有）
     final_user_content = chat_req.user_content
-    working_directory = None
+    working_directory = body.get("working_directory", "") or body.get("cwd", "")
     if req_result.get("edited") and req_result.get("body"):
         edited = req_result["body"]
         if isinstance(edited, dict):
@@ -173,31 +254,62 @@ async def chat_completions(request: Request):
             if "working_directory" in edited:
                 working_directory = edited["working_directory"]
 
-    resp_body = await react_loop(
-        _CURRENT_PROVIDER,
-        final_user_content,
+    import rules
+    cleaned_content, strip_hits = rules.clean_request_content(final_user_content)
+    final_user_content = cleaned_content or "(empty after strip)"
+
+    user_msg = final_user_content
+
+    # 直接调 DS，不做 react 循环（CC 自己处理 react）
+    messages = [{"role": "user", "content": user_msg}]
+    events = _CURRENT_PROVIDER.chat(
+        messages,
+        model=model,
+        thinking_enabled=True,
+        search_enabled=False,
+    )
+
+    # 非流式：收集完所有事件再返回（stream 已在入口处拦截返回空）
+    collected = []
+    async for ev in events:
+        collected.append(ev)
+
+    async def _iter(items):
+        for item in items:
+            yield item
+
+    final_resp = await collect_response(
+        _iter(collected),
         request_id=request_id,
         model=model,
         tools_schema=tools,
-        cwd=working_directory,
     )
+
+    # 响应过滤
+    output_text = final_resp.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+    filtered, hits = rules.filter_response(output_text)
+    if filtered != output_text or hits:
+        final_resp["choices"][0]["message"]["content"] = filtered or None
+
+    # token 跟踪
+    sess.track_message(final_user_content, output_text)
 
     duration_ms = (time.time() - t0) * 1000
 
     # 审批：响应
     resp_result = await approval.queue.intercept_response(
         request_item_id=0, status=200,
-        body=resp_body, duration_ms=duration_ms,
+        body=final_resp, duration_ms=duration_ms,
     )
     if resp_result["action"] == "reject":
         return JSONResponse(status_code=403, content={
             "error": {"message": resp_result.get("error", "响应被拒绝"), "type": "permission_error"},
         })
 
-    # 使用编辑后的响应（如果有）
-    final_resp = resp_body
     if resp_result.get("edited") and resp_result.get("body"):
         final_resp = resp_result["body"]
+
+    print(f"[{rid}] DONE duration={duration_ms:.0f}ms finish={final_resp.get('choices',[{}])[0].get('finish_reason','?')} tool_calls={bool(final_resp.get('choices',[{}])[0].get('message',{}).get('tool_calls'))}")
 
     return JSONResponse(content=final_resp)
 
@@ -445,14 +557,38 @@ async def api_set_terminal(request: Request):
     return {"ok": True, "terminal": terminal}
 
 
+@app.get("/api/config/model")
+async def api_get_model():
+    """获取当前模型。"""
+    cfg = config.load_config()
+    return {"model": cfg.get("model", "deepseek-v4-flash")}
+
+
+@app.post("/api/config/model")
+async def api_set_model(request: Request):
+    """设置模型。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    model = body.get("model", "deepseek-v4-flash")
+    if model not in ("deepseek-v4-flash", "deepseek-v4-pro"):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "model must be deepseek-v4-flash or deepseek-v4-pro"})
+    config.update_config(model=model)
+    return {"ok": True, "model": model}
+
+
 @app.post("/api/tool-config/init")
 async def api_init_tools(request: Request):
     """发送初始化消息给 DeepSeek。携带工作目录、项目背景。"""
     cfg = accounts.get_account_config()
     if not cfg.get("token"):
         return JSONResponse(status_code=401, content={"ok": False, "error": "未登录"})
-    if not cfg.get("session_id"):
+    # 用 sessions.json 的 active session，不用 accounts.json 的
+    active_sid = sess.get_current_session_id()
+    if not active_sid:
         return JSONResponse(status_code=400, content={"ok": False, "error": "没有 active session"})
+    cfg["session_id"] = active_sid
 
     body = {}
     try:
@@ -477,8 +613,10 @@ async def api_init_tools(request: Request):
         return {"ok": True, "prompt": prompt, "length": len(prompt)}
 
     ds_messages = [{"role": "user", "content": prompt}]
+    active_model = sess.get_active_model()
+    active_model_type = "expert" if "pro" in active_model else "default"
     ds_stream = ds_api.chat_completion(
-        cfg=cfg, messages=ds_messages, model="deepseek-default", model_type="default",
+        cfg=cfg, messages=ds_messages, model=active_model, model_type=active_model_type,
         thinking_enabled=True, search_enabled=False, stream=True,
     )
 
@@ -515,6 +653,7 @@ async def api_new_session(request: Request):
     except Exception:
         body = {}
     label = body.get("label", "")
+    model = body.get("model", "deepseek-v4-flash")
 
     cfg = accounts.get_account_config()
     if not cfg.get("token"):
@@ -524,9 +663,9 @@ async def api_new_session(request: Request):
     if not new_sid:
         return JSONResponse(status_code=500, content={"ok": False, "error": "创建 session 失败"})
 
-    sess.register_session(new_sid, label=label)
+    sess.register_session(new_sid, label=label, model=model)
     sess.activate_session(new_sid)
-    return {"ok": True, "session_id": new_sid, "label": label}
+    return {"ok": True, "session_id": new_sid, "label": label, "model": model}
 
 
 @app.post("/api/sessions/activate")
@@ -729,6 +868,31 @@ async def admin_tools():
     return HTMLResponse(render_tools())
 
 
+@app.get("/admin/parser-flow")
+async def admin_parser_flow():
+    """解析器流程说明页。"""
+    from admin_page import render_parser_flow
+    return HTMLResponse(render_parser_flow())
+
+
+@app.post("/api/tool-config/parse")
+async def api_tool_config_parse(request: Request):
+    """实时解析工具调用文本。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+    text = body.get("text", "")
+    if not text:
+        return JSONResponse({"error": "text required"})
+    try:
+        from tool_format import parse_tool_blocks
+        remaining, tool_calls = parse_tool_blocks(text, None)
+        return JSONResponse({"tool_calls": tool_calls, "remaining": remaining})
+    except Exception as e:
+        return JSONResponse({"error": str(e)})
+
+
 @app.get("/admin/debug")
 async def admin_debug():
     """调试拦截页。"""
@@ -788,6 +952,7 @@ else:
 
 if __name__ == "__main__":
     import uvicorn
+    import uvicorn.server
 
     # 尝试从旧版 config 导入账号
     accounts.import_from_config()
@@ -804,4 +969,16 @@ if __name__ == "__main__":
     print(f"  GET  /health               →  Health check")
     print()
 
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    # 用 Server 类直接跑，不 spawn 子进程，避免残留孤儿进程
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=port,
+        workers=1,
+        reload=False,
+        loop="asyncio",
+        http="h11",
+        log_config=None,
+    )
+    server = uvicorn.Server(config)
+    server.run()

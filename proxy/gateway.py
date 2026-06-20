@@ -71,39 +71,35 @@ def is_claude_housekeeping_request(data: dict) -> bool:
 
     返回 True = 应该丢弃请求，不发给 DeepSeek
     """
-    prompt = extract_clean_user_prompt(data)
-    if not prompt:
+    # 直接扫原始 body JSON（不 strip），命中即丢
+    body_text = json.dumps(data, ensure_ascii=False).lower() if data else ""
+
+    # 标题生成：system message 里有 "generate a concise" + user message 里有 "write the title"
+    if "generate a concise" in body_text and "title" in body_text:
         return True
 
-    # 1) 兜底：清洗后 prompt 只是固定 housekeeping 文案
-    housekeeping_keywords = [
-        "suggest what the user might naturally type",
-        "look at the user's recent messages",
-        "stay silent if the next step isn't obvious",
-        "format: 2-12 words",
-        "reply with only the suggestion",
-        "your job is to predict",
-        "first: look at the user's recent messages",
-        "the test: would they think",
-        "write the title in the language",
-        "regardless of the language of the examples above",
-    ]
-    pl = prompt.lower()
-    if any(kw in pl for kw in housekeeping_keywords):
-        return True
-
-    # 2) 扫描整个 body 所有文本块，含 housekeeping 标记就丢弃
-    housekeeping_markers = [
+    # suggestion 模式
+    suggestion_markers = [
         "[suggestion mode",
         "suggestion mode:",
         "predict what they would type",
         "stay silent if the next step isn't obvious",
+        "your job is to predict",
+        "first: look at the user's recent messages",
+        "the test: would they think",
+        "format: 2-12 words",
+        "reply with only the suggestion",
+    ]
+    if any(m in body_text for m in suggestion_markers):
+        return True
+
+    # 标题指令（fallback）
+    title_markers = [
         "write the title in the language",
         "write a title for",
         "regardless of the language of the examples above",
     ]
-    body_text = json.dumps(data, ensure_ascii=False).lower() if data else ""
-    if any(m in body_text for m in housekeeping_markers):
+    if any(m in body_text for m in title_markers):
         return True
 
     return False

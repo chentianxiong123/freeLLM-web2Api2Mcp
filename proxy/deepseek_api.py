@@ -307,13 +307,9 @@ def chat_completion(
             sess.on_new_session(session_id, model)
             cfg = config.load_config()
 
-    # 检查是否需要续期
-    if sess.needs_renewal():
-        print("[Chat] Token threshold reached, creating new session...")
-        session_id = create_new_session(cfg)
-        if session_id:
-            sess.on_new_session(session_id, model)
-            cfg = config.load_config()
+    import traceback
+    print(f"[DS-CALL] chat_completion ENTRY session={session_id[:8]} model={model} model_type={model_type} is_retry={is_retry}")
+    print(f"[DS-CALL] caller stack:\n{''.join(traceback.format_stack()[-6:-1])}")
 
     # PoW
     pow_resp = get_pow_response(cfg, session_id=session_id)
@@ -355,6 +351,8 @@ def chat_completion(
         "thinking_enabled": thinking_enabled,
         "search_enabled": search_enabled,
     }
+
+    print(f"[DS-REQ] prompt[:200]={req_body['prompt'][:200]!r} parent={parent_message_id} model_type={model_type or 'default'}")
 
     # model_type：DeepSeek 根据此值路由到不同模型后端
     # 优先使用调用方传入的 model_type，其次从模型名推断
@@ -451,10 +449,7 @@ def chat_completion(
                     try:
                         sess.set_last_message_id(val)
                         sess.increment_message_count()
-                        # 抓 token 终值时累加
-                        if captured_tokens:
-                            sess.add_tokens(captured_tokens[-1])
-                            print(f"[Chat] {session_id[:8]}... 本次 token 消耗={captured_tokens[-1]} (累计已写disk)")
+                        # token 用量在 react_loop 里统一按字符估算，这里不再重复加
                     except Exception as e:
                         print(f"[Chat] ⚠️ 写 disk 失败: {e}")
                     print(f"[Chat] {session_id[:8]}... captured message_id={val} (内存+disk，下次续接用)")

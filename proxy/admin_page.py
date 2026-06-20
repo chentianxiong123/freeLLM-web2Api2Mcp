@@ -126,6 +126,7 @@ def _sidebar(active_page):
         ("/admin/sessions", "💬", "会话"),
         ("/admin/rules", "🛡️", "规则"),
         ("/admin/tools", "🎮", "工具"),
+        ("/admin/parser-flow", "🔧", "解析器"),
         ("/admin/debug", "🔍", "调试"),
     ]
     links = ""
@@ -200,7 +201,10 @@ def render_overview(cfg, usage):
     status_text = '✅ 已登录' if cfg.get('token') else '❌ 未登录'
     token_display = (cfg.get('token', '')[:24] + '…') if cfg.get('token') else '空'
     sid_display = (cfg.get('session_id', '')[:24] + '…') if cfg.get('session_id') else '空'
-    ptokens = usage.get('prompt_tokens', 0)
+    inp_t = usage.get('input_tokens', 0)
+    out_t = usage.get('output_tokens', 0)
+    tot_t = usage.get('total_tokens', inp_t + out_t)
+    msg_c = usage.get('message_count', 0)
     port = cfg.get('port', 48391)
 
     # 获取账号信息
@@ -222,7 +226,10 @@ def render_overview(cfg, usage):
   <div class="status-row"><span class="lbl">Token</span><span class="val">{token_display}</span></div>
   <div class="status-row"><span class="lbl">Session ID</span><span class="val">{sid_display}</span></div>
   <div class="status-row"><span class="lbl">端口</span><span class="val">{port}</span></div>
-  <div class="status-row"><span class="lbl">累计 Prompt Tokens</span><span class="val">{ptokens}</span></div>
+  <div class="status-row"><span class="lbl">累计输入 Tokens</span><span class="val">{inp_t:,}</span></div>
+  <div class="status-row"><span class="lbl">累计输出 Tokens</span><span class="val">{out_t:,}</span></div>
+  <div class="status-row"><span class="lbl">累计总 Tokens</span><span class="val">{tot_t:,}</span></div>
+  <div class="status-row"><span class="lbl">消息数</span><span class="val">{msg_c}</span></div>
 </div>
 
 <div class="card">
@@ -384,6 +391,13 @@ def render_sessions():
       <button class="btn-primary btn-sm" onclick="newSession()">➕ 新建</button>
     </div>
   </div>
+  <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
+    <label style="font-size:11px;font-weight:600">新建模型：</label>
+    <select id="newModelSelect" style="padding:4px 8px;border:1px solid #d9d9d9;border-radius:4px;font-size:11px">
+      <option value="deepseek-v4-flash">🚀 Flash (快速)</option>
+      <option value="deepseek-v4-pro">🧠 Pro (专家)</option>
+    </select>
+  </div>
   <div id="sessionList"><div class="empty">加载中...</div></div>
 </div>"""
 
@@ -407,22 +421,28 @@ function renderSessionCard(s) {
     var label = s.label ? escapeHtml(s.label) + ' · ' : '';
     var sid = s.session_id || '';
     var sidShort = sid ? escapeHtml(sid.slice(0, 8)) + '…' : '-';
+    var inp = s.input_tokens || 0;
+    var out = s.output_tokens || 0;
+    var total = s.total_tokens || (inp + out);
+    var model = s.model || 'deepseek-v4-flash';
+    var modelTag = model.includes('pro') ? '<span class="tag tag-warn">Pro</span>' : '<span class="tag tag-ok">Flash</span>';
     var switchBtn = active ? '' : '<button class="btn-primary btn-sm" onclick="activateSession(\\'' + escapeHtml(sid) + '\\')">切换</button>';
     var delBtn = active ? '' : '<button class="btn-danger btn-sm" onclick="deleteSession(\\'' + escapeHtml(sid) + '\\')">删</button>';
     return '<div class="item-card" style="' + (active ? 'border-color:#52c41a;background:#f6ffed' : '') + '">'
         + '<div class="item-head"><div class="item-info">'
-        + '<div class="item-title">' + label + escapeHtml(sidShort) + ' ' + badge + '</div>'
-        + '<div class="item-meta"><b>消息:</b> ' + (s.message_count || 0) + ' <b>token:</b> ' + (s.prompt_tokens || 0) + ' <b>续接:</b> ' + mid + ' <b>使用:</b> ' + lastUsed
+        + '<div class="item-title">' + label + escapeHtml(sidShort) + ' ' + badge + ' ' + modelTag + '</div>'
+        + '<div class="item-meta"><b>消息:</b> ' + (s.message_count || 0) + ' <b>↘输入:</b> ' + (inp).toLocaleString() + ' <b>↗输出:</b> ' + (out).toLocaleString() + ' <b>总计:</b> ' + (total).toLocaleString() + ' <b>续接:</b> ' + mid + ' <b>使用:</b> ' + lastUsed
         + '</div></div><div class="item-actions">' + switchBtn + delBtn + '</div></div></div>';
 }
 
 async function newSession() {
     var label = prompt('会话名称（可选）', '');
     if (label === null) return;
+    var model = $('newModelSelect').value;
     try {
-        var r = await fetch('/api/sessions/new', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({label:label}) });
+        var r = await fetch('/api/sessions/new', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({label:label, model:model}) });
         var d = await r.json();
-        if (d.ok) { showToast('✅ 已创建', true); refreshSessions(); }
+        if (d.ok) { showToast('✅ 已创建 (' + model.replace('deepseek-v4-', '') + ')', true); refreshSessions(); }
         else { showToast('❌ ' + (d.error||'失败'), false); }
     } catch(e) { showToast('❌ ' + e.message, false); }
 }
@@ -505,13 +525,21 @@ async function refreshRules() {
 
 function renderRuleCard(r) {
     var badge = r.enabled ? '<span class="tag tag-ok">启用</span>' : '<span class="tag" style="background:#f5f5f5;color:#999">停用</span>';
+    var mt = r.match_type || 'substring';
+    var scope = r.scope || 'request';
+    var mtBadge = mt === 'regex'
+        ? '<span class="tag" style="background:#fff7e6;color:#d46b08">regex</span>'
+        : '<span class="tag" style="background:#e6f7ff;color:#096dd9">substring</span>';
+    var scopeBadge = scope === 'response'
+        ? '<span class="tag" style="background:#f6ffed;color:#389e0d">响应</span>'
+        : '<span class="tag" style="background:#f0f5ff;color:#1d39c4">请求</span>';
     var pat = r.pattern ? '<code style="background:#f5f5f5;padding:1px 4px;border-radius:3px;font-size:10px">' + escapeHtml(r.pattern) + '</code>' : '';
     var toggleBtn = r.enabled
         ? '<button class="btn-ghost btn-sm" onclick="toggleRule(\\'' + r.id + '\\',false)">停用</button>'
         : '<button class="btn-primary btn-sm" onclick="toggleRule(\\'' + r.id + '\\',true)">启用</button>';
     return '<div class="item-card" style="' + (r.enabled ? '' : 'opacity:.6') + '">'
         + '<div class="item-head"><div class="item-info">'
-        + '<div class="item-title">' + badge + ' <b>' + escapeHtml(r.name) + '</b></div>'
+        + '<div class="item-title">' + badge + ' ' + mtBadge + ' ' + scopeBadge + ' <b>' + escapeHtml(r.name) + '</b></div>'
         + '<div class="item-meta">' + pat + (r.note ? ' · ' + escapeHtml(r.note) : '') + '</div>'
         + '</div><div class="item-actions">' + toggleBtn
         + '<button class="btn-ghost btn-sm" onclick="openRuleForm(\\'' + r.id + '\\')">编辑</button>'
@@ -536,8 +564,13 @@ async function resetRules() {
 function openRuleForm(rid) {
     var isEdit = !!rid;
     var html = '<form id="ruleForm" onsubmit="return submitRuleForm(event,\\'' + (rid||'') + '\\')">'
-        + '<label>规则名称 *</label><input name="name" required placeholder="SUGGESTION MODE">'
-        + '<label>pattern</label><input name="pattern" required placeholder="suggestion mode">'
+        + '<label>规则名称 *</label><input name="name" required placeholder="SYSTEM REMINDER">'
+        + '<div style="display:flex;gap:8px">'
+        + '<div style="flex:1"><label>匹配方式</label><select name="match_type"><option value="substring">substring</option><option value="regex">regex</option></select></div>'
+        + '<div style="flex:1"><label>作用域</label><select name="scope"><option value="request">请求拦截</option><option value="response">响应过滤</option></select></div>'
+        + '<div style="flex:1" id="actionField"><label>动作</label><select name="action"><option value="block">block 整个拦</option><option value="strip">strip 只删匹配</option></select></div>'
+        + '</div>'
+        + '<label>pattern</label><input name="pattern" required placeholder="&lt;system-reminder&gt;.*?&lt;/system-reminder&gt;">'
         + '<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="enabled" checked style="width:auto">启用</label>'
         + '<label>备注</label><input name="note">'
         + '<div style="display:flex;gap:6px;margin-top:10px;justify-content:flex-end">'
@@ -549,8 +582,13 @@ function openRuleForm(rid) {
             var t = (d.rules||[]).find(x=>x.id===rid);
             if (!t) return;
             var f = $('ruleForm');
-            f.name.value = t.name||''; f.pattern.value = t.pattern||'';
-            f.enabled.checked = t.enabled!==false; f.note.value = t.note||'';
+            f.name.value = t.name||'';
+            f.pattern.value = t.pattern||'';
+            f.match_type.value = t.match_type||'substring';
+            f.scope.value = t.scope||'request';
+            if (f.action) f.action.value = t.action||'block';
+            f.enabled.checked = t.enabled!==false;
+            f.note.value = t.note||'';
         });
     }
 }
@@ -558,7 +596,15 @@ function openRuleForm(rid) {
 async function submitRuleForm(ev, rid) {
     ev.preventDefault();
     var f = ev.target;
-    var body = { name:f.name.value.trim(), pattern:f.pattern.value, enabled:f.enabled.checked, note:f.note.value.trim() };
+    var body = {
+        name: f.name.value.trim(),
+        match_type: f.match_type.value,
+        scope: f.scope.value,
+        action: f.action ? f.action.value : 'block',
+        pattern: f.pattern.value,
+        enabled: f.enabled.checked,
+        note: f.note.value.trim()
+    };
     try {
         var url = rid ? '/api/rules/update/' + rid : '/api/rules/add';
         var r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
@@ -617,55 +663,7 @@ def render_tools():
   <div id="toolConfigCard"><div class="empty">加载中...</div></div>
 </div>
 
-<div class="card">
-  <h2>🔍 解析器流程</h2>
-  <div style="font-size:11px;color:#666;margin-bottom:8px">DeepSeek 返回自然语言格式，解析器用正则切出工具块，转成结构化 tool_calls</div>
-  <div id="parserFlow">
-    <div style="padding:10px;background:#f5f5f5;border-radius:6px;font-size:11px;line-height:1.8">
-      <div><b>1. DeepSeek 原始回复</b>（自然语言暗语）</div>
-      <pre style="margin:4px 0;padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;font-size:11px;white-space:pre-wrap">好的，我先看看。
-
-工具 Bash
-command="Get-ChildItem C:/Users"
-description="列出用户目录"
-工具结束</pre>
-
-      <div style="margin-top:8px"><b>2. 正则匹配</b>（tool_format.py）</div>
-      <div style="padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;margin:4px 0">
-        <div style="font-family:monospace;font-size:10px;color:#666">TOOL_BLOCK_RE = 工具名行 + key=value行 + 工具结束</div>
-        <div style="font-family:monospace;font-size:10px;color:#666;margin-top:4px">KEY_VALUE_RE = 匹配 key="value" 或 key=value</div>
-      </div>
-
-      <div style="margin-top:8px"><b>3. 解析结果</b>（结构化）</div>
-      <pre style="margin:4px 0;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:4px;font-size:11px">{
-  "name": "Bash",
-  "arguments": {
-    "command": "Get-ChildItem C:/Users",
-    "description": "列出用户目录"
-  }
-}</pre>
-
-      <div style="margin-top:8px"><b>4. 类型推断</b></div>
-      <div style="padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;margin:4px 0;font-size:10px;color:#666">
-        <div>• string → 保持字符串</div>
-        <div>• integer → int(value)</div>
-        <div>• number → float(value)</div>
-        <div>• boolean → true/false → True/False</div>
-        <div>• ~/路径 → 自动展开为绝对路径</div>
-      </div>
-
-      <div style="margin-top:8px"><b>5. 输出</b>（OpenAI tool_calls 格式）</div>
-      <pre style="margin:4px 0;padding:8px;background:#e6f7ff;border:1px solid #91d5ff;border-radius:4px;font-size:11px">{
-  "id": "call_xxx",
-  "type": "function",
-  "function": {
-    "name": "Bash",
-    "arguments": "{\\"command\\": \\"Get-ChildItem C:/Users\\"}"
-  }
-}</pre>
-    </div>
-  </div>
-</div>"""
+"""
 
     js = """\
 var currentTerminal = 'powershell';
@@ -731,7 +729,7 @@ async function refreshToolConfig() {
             + '<div style="margin-bottom:8px;padding:8px;background:#fffbe6;border:1px solid #ffe58f;border-radius:4px;font-size:11px">'
             + '<b>📂 初始化参数（初始化时填入）</b>'
             + '<div style="display:flex;gap:8px;margin-top:4px">'
-            + '<input id="initWorkDir" placeholder="工作目录（如 D:\\my-project）" style="flex:1">'
+            + '<input id="initWorkDir" placeholder="工作目录（如 D:/my-project）" style="flex:1">'
             + '<input id="initProjectCtx" placeholder="项目背景（可选，如 Vue3 + TS）" style="flex:2">'
             + '</div>'
             + '</div>'
@@ -787,56 +785,7 @@ async function changeTerminal() {
     } catch(e) { showToast('❌ 切换失败', false); }
 }
 
-        var toolHtml = names.map(name => {
-            var spec = tools[name];
-            var req = (spec.required||[]).join(', ') || '无';
-            var opt = Object.keys(spec.optional||{}).join(', ') || '无';
-            return '<div style="padding:8px;background:#fafafa;border-radius:4px;margin-bottom:6px;border-left:2px solid #1677ff">'
-                + '<div style="font-size:12px;font-weight:600;color:#1677ff">' + escapeHtml(name) + '</div>'
-                + '<div style="font-size:10px;color:#666;margin-top:4px">' + escapeHtml(spec.description||'') + '</div>'
-                + '<div style="font-size:10px;color:#888;margin-top:4px"><b>必填:</b> ' + escapeHtml(req) + ' · <b>可选:</b> ' + escapeHtml(opt) + '</div></div>';
-        }).join('');
 
-        // 自然语言示例
-        var exampleHtml = '<div style="margin-top:12px;padding:10px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:6px">'
-            + '<div style="font-size:12px;font-weight:600;color:#389e0d;margin-bottom:8px">💡 自然语言示例</div>'
-            + '<div style="font-size:11px;line-height:1.8">'
-
-        // 从工具生成示例
-        var toolExamples = [];
-        if (tools['Bash']) {
-            toolExamples.push({ input: '看看桌面上有什么', tool: 'Bash', args: {command: 'Get-ChildItem C:/Users/a1/Desktop'} });
-        }
-        if (tools['Read']) {
-            toolExamples.push({ input: '读一下 config.json', tool: 'Read', args: {file_path: 'config.json'} });
-        }
-        if (tools['Write']) {
-            toolExamples.push({ input: '把 hello 写到 test.txt', tool: 'Write', args: {file_path: 'test.txt', content: 'hello'} });
-        }
-        if (tools['Edit']) {
-            toolExamples.push({ input: '把 old 换成 new', tool: 'Edit', args: {file_path: 'test.txt', old_string: 'old', new_string: 'new'} });
-        }
-
-        toolHtml += '<div style="margin-top:12px"><b style="font-size:11px">🔄 转换示例</b></div>';
-        toolExamples.forEach(ex => {
-            toolHtml += '<div style="padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;margin-top:6px">'
-                + '<div style="font-size:10px;color:#999">用户说: "' + escapeHtml(ex.input) + '"</div>'
-                + '<div style="font-size:11px;margin-top:4px;color:#52c41a">→ DeepSeek 返回:</div>'
-                + '<pre style="margin:4px 0;padding:6px;background:#f5f5f5;border-radius:3px;font-size:10px;white-space:pre-wrap">工具 ' + ex.tool + '\\n' + Object.entries(ex.args).map(([k,v]) => k + '=\\"' + v + '\\"').join('\\n') + '\\n工具结束</pre>'
-                + '<div style="font-size:11px;color:#1677ff">→ 解析为:</div>'
-                + '<pre style="margin:4px 0;padding:6px;background:#e6f7ff;border-radius:3px;font-size:10px;white-space:pre-wrap">' + escapeHtml(JSON.stringify({name:ex.tool, arguments:ex.args}, null, 2)) + '</pre>'
-                + '</div>';
-        });
-
-        $('toolConfigCard').innerHTML =
-            '<div style="margin-bottom:6px;font-size:11px;color:#888">' + names.length + ' 个工具 · 模板 ' + template.length + ' 字符</div>'
-            + '<div style="margin-bottom:6px"><b style="font-size:11px">📝 模板（发给 DeepSeek 的 system prompt）</b>'
-            + '<textarea id="tmplEditor" rows="4" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:11px;margin-top:4px">' + escapeHtml(template) + '</textarea>'
-            + '<div style="text-align:right;margin-top:4px"><button class="btn-ghost btn-sm" onclick="saveToolConfig()">💾 保存</button></div></div>'
-            + '<div><b style="font-size:11px">🔧 工具定义</b></div>' + toolHtml
-            + '<div id="initMsg" style="margin-top:6px"></div>';
-    } catch(e) { $('toolConfigCard').innerHTML = '<div class="empty">加载失败</div>'; }
-}
 
 function toggleSection(i) {
     var chk = $('sec_chk_' + i);
@@ -896,7 +845,7 @@ async function previewInit() {
 async function initTools() {
     var wd = $('initWorkDir').value || '.';
     var pc = $('initProjectCtx').value || '';
-    if (!confirm('发送初始化消息到 DeepSeek？\n工作目录: ' + (wd || '.') + '\n项目背景: ' + (pc || '(无)') + '\n\n先预览确认？')) return;
+    if (!confirm('发送初始化消息到 DeepSeek？\\n工作目录: ' + (wd || '.') + '\\n项目背景: ' + (pc || '(无)') + '\\n\\n先预览确认？')) return;
     try {
         var r = await fetch('/api/tool-config/init', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({working_directory: wd, project_context: pc}) });
         var d = await r.json();
@@ -909,6 +858,88 @@ refreshToolConfig();"""
 
     sidebar = _sidebar("/admin/tools")
     return _page_shell("工具", sidebar, content, js)
+
+
+def render_parser_flow():
+    """解析器流程说明页"""
+    content = r"""<div class="card">
+  <h2>🔍 解析器流程</h2>
+  <div style="font-size:11px;color:#666;margin-bottom:8px">DeepSeek 返回自然语言格式，解析器用正则切出工具块，转成结构化 tool_calls</div>
+  <div style="padding:10px;background:#f5f5f5;border-radius:6px;font-size:11px;line-height:1.8">
+    <div><b>1. DeepSeek 原始回复</b>（自然语言暗语）</div>
+    <pre style="margin:4px 0;padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;font-size:11px;white-space:pre-wrap">好的，我先看看。
+
+工具 Bash
+command="Get-ChildItem C:/Users"
+description="列出用户目录"
+工具结束</pre>
+
+    <div style="margin-top:8px"><b>2. 正则匹配</b>（tool_format.py）</div>
+    <div style="padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;margin:4px 0">
+      <div style="font-family:monospace;font-size:10px;color:#666">TOOL_BLOCK_RE = 工具名行 + key=value行 + 工具结束</div>
+      <div style="font-family:monospace;font-size:10px;color:#666;margin-top:4px">KEY_VALUE_RE = 匹配 key="value" 或 key=value</div>
+    </div>
+
+    <div style="margin-top:8px"><b>3. 解析结果</b>（结构化）</div>
+    <pre style="margin:4px 0;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:4px;font-size:11px">{
+  "name": "Bash",
+  "arguments": {
+    "command": "Get-ChildItem C:/Users",
+    "description": "列出用户目录"
+  }
+}</pre>
+
+    <div style="margin-top:8px"><b>4. 类型推断</b></div>
+    <div style="padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;margin:4px 0;font-size:10px;color:#666">
+      <div>- string → 保持字符串</div>
+      <div>- integer → int(value)</div>
+      <div>- number → float(value)</div>
+      <div>- boolean → true/false → True/False</div>
+      <div>- ~/路径 → 自动展开为绝对路径</div>
+    </div>
+
+    <div style="margin-top:8px"><b>5. 输出</b>（OpenAI tool_calls 格式）</div>
+    <pre style="margin:4px 0;padding:8px;background:#e6f7ff;border:1px solid #91d5ff;border-radius:4px;font-size:11px">{
+  "id": "call_xxx",
+  "type": "function",
+  "function": {
+    "name": "Bash",
+    "arguments": "{\"command\": \"Get-ChildItem C:/Users\"}"
+  }
+}</pre>
+
+    <div style="margin-top:12px;padding:10px;background:#fffbe6;border:1px solid #ffe58f;border-radius:4px">
+      <b style="font-size:11px">💡 实时解析测试</b>
+      <div style="margin-top:6px">
+        <textarea id="parseInput" rows="3" style="width:100%;padding:6px;border:1px solid #d9d9d9;border-radius:4px;font-family:monospace;font-size:11px" placeholder="粘贴一段 DeepSeek 回复，包含工具块...">工具 Bash
+command="ls -la"
+工具结束</textarea>
+        <div style="text-align:right;margin-top:4px">
+          <button class="btn-primary btn-sm" onclick="testParse()">▶ 解析</button>
+        </div>
+      </div>
+      <pre id="parseOutput" style="margin-top:6px;padding:8px;background:#f5f5f5;border-radius:4px;font-size:11px;white-space:pre-wrap;min-height:40px;display:none"></pre>
+    </div>
+  </div>
+</div>"""
+
+    js = """\
+async function testParse() {
+    var input = $('parseInput').value;
+    if (!input) return;
+    try {
+        var r = await fetch('/api/tool-config/parse', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text: input}) });
+        var d = await r.json();
+        var out = $('parseOutput');
+        out.style.display = 'block';
+        if (d.error) { out.innerHTML = '<span style=color:#cf1322>Error: ' + escapeHtml(d.error) + '</span>'; return; }
+        out.innerHTML = '<b style=color:#389e0d>解析成功!</b>\\n' + escapeHtml(JSON.stringify(d.tool_calls, null, 2));
+    } catch(e) { $('parseOutput').innerHTML = '<span style=color:#cf1322>' + escapeHtml(e.message) + '</span>'; }
+}
+testParse();"""
+
+    sidebar = _sidebar("/admin/parser-flow")
+    return _page_shell("解析器", sidebar, content, js)
 
 
 def render_debug():

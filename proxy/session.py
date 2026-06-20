@@ -25,8 +25,16 @@ from pathlib import Path
 
 import config
 
-# DeepSeek V4 上下文窗口 1M，留 10% 余量
-TOKEN_THRESHOLD = 900_000
+# Token 估算：不分语言，统一 char/2（中英文混合的经验值）
+TOKEN_EST_RATIO = 2.0  # 每个 token 平均 2 字符
+
+
+def _estimate_tokens(text: str) -> int:
+    """粗略估算 token 数。DS 不返回精确值，按字符数估算。"""
+    if not text:
+        return 0
+    return max(1, int(len(text) / TOKEN_EST_RATIO))
+
 
 SESSION_FILE = Path(__file__).parent / "sessions.json"
 _LOCK = threading.Lock()
@@ -77,23 +85,22 @@ def _save(data: dict) -> None:
 
 
 def needs_renewal() -> bool:
-    """检查当前 session 是否需要续期（token 超限）。"""
-    db = _load()
-    sid = db.get("active_session_id", "")
-    s = db.get("sessions", {}).get(sid, {})
-    return s.get("prompt_tokens", 0) > TOKEN_THRESHOLD
+    """不再自动判断续期，统一由用户手动切换 session。"""
+    return False
 
 
 def get_usage_status() -> dict:
-    """返回当前 session 的用量状态。"""
+    """返回当前 session 的累计 token 用量。"""
     db = _load()
     sid = db.get("active_session_id", "")
     s = db.get("sessions", {}).get(sid, {})
-    used = s.get("prompt_tokens", 0)
+    inp = s.get("input_tokens", 0)
+    out = s.get("output_tokens", 0)
     return {
-        "prompt_tokens": used,
-        "threshold": TOKEN_THRESHOLD,
-        "remaining": max(0, TOKEN_THRESHOLD - used),
+        "input_tokens": inp,
+        "output_tokens": out,
+        "total_tokens": inp + out,
+        "message_count": s.get("message_count", 0),
     }
 
 
@@ -108,14 +115,17 @@ def on_new_session(session_id: str, model: str = "") -> None:
     if session_id not in sessions:
         sessions[session_id] = {
             "label": model or "",
+            "model": model or "deepseek-v4-flash",
             "last_message_id": None,
             "message_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
             "created_at": now,
             "last_used_at": now,
         }
     db["active_session_id"] = session_id
     _save(db)
-    config.update_config(session_id=session_id)
+    config.update_config(session_id=session_id, model=sessions[session_id].get("model", "deepseek-v4-flash"))
 
 
 def set_last_message_id(message_id: str | int | None) -> None:
@@ -169,19 +179,24 @@ def get_current_session_id() -> str:
 
 
 def list_sessions() -> list[dict]:
-    """列出所有 session（含 active 标记），按 last_used_at 倒序。"""
+    """列出所有 session（含 active 标记 + 累计 token 数），按 last_used_at 倒序。"""
     db = _load()
     sid_active = db.get("active_session_id", "")
     sessions = db.get("sessions", {})
     out = []
     for sid, s in sessions.items():
+        inp = s.get("input_tokens", 0)
+        out_t = s.get("output_tokens", 0)
         out.append({
             "session_id": sid,
             "active": sid == sid_active,
             "label": s.get("label", ""),
+            "model": s.get("model", "deepseek-v4-flash"),
             "last_message_id": s.get("last_message_id"),
             "message_count": s.get("message_count", 0),
-            "prompt_tokens": s.get("prompt_tokens", 0),  # 本 session 累计 token
+            "input_tokens": inp,
+            "output_tokens": out_t,
+            "total_tokens": inp + out_t,
             "created_at": s.get("created_at"),
             "last_used_at": s.get("last_used_at"),
         })
@@ -190,7 +205,7 @@ def list_sessions() -> list[dict]:
 
 
 def activate_session(session_id: str) -> bool:
-    """切换 active session（写 sessions.json + 同步 config.json）。
+    """切换 active session（写 sessions.json + 同步 config.json + 同步 accounts.json）。
 
     返回 True/False 表示是否切换成功（session_id 存在就成功）。
     """
@@ -201,11 +216,11 @@ def activate_session(session_id: str) -> bool:
     db["active_session_id"] = session_id
     sessions[session_id]["last_used_at"] = time.time()
     _save(db)
-    config.update_config(session_id=session_id)
+    config.update_config(session_id=session_id, model=sessions[session_id].get("model", "deepseek-v4-flash"))
     return True
 
 
-def register_session(session_id: str, label: str = "") -> dict:
+def register_session(session_id: str, label: str = "", model: str = "") -> dict:
     """手动注册一个新 session（如果不存在则新建，存在则更新 label）。
 
     返回注册后的 session 详情。
@@ -216,11 +231,16 @@ def register_session(session_id: str, label: str = "") -> dict:
     if session_id in sessions:
         if label:
             sessions[session_id]["label"] = label
+        if model:
+            sessions[session_id]["model"] = model
     else:
         sessions[session_id] = {
             "label": label or "",
+            "model": model or "deepseek-v4-flash",
             "last_message_id": None,
             "message_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
             "created_at": now,
             "last_used_at": now,
         }
@@ -257,6 +277,14 @@ def set_specific_last_message_id(session_id: str, message_id: str | int | None) 
     return True
 
 
+def get_active_model() -> str:
+    """获取当前活跃 session 的模型。"""
+    db = _load()
+    sid = db.get("active_session_id", "")
+    s = db.get("sessions", {}).get(sid, {})
+    return s.get("model", "deepseek-v4-flash")
+
+
 def increment_message_count(session_id: str | None = None) -> None:
     """某个 session 的消息数 +1（默认 active session）。"""
     db = _load()
@@ -265,6 +293,25 @@ def increment_message_count(session_id: str | None = None) -> None:
         return
     s = db.setdefault("sessions", {}).setdefault(sid, {})
     s["message_count"] = s.get("message_count", 0) + 1
+    s["last_used_at"] = time.time()
+    db["sessions"][sid] = s
+    _save(db)
+
+
+def track_message(input_text: str, output_text: str = "", session_id: str | None = None) -> None:
+    """记录一次消息交换的 token 用量。
+
+    输入按字符估算，持续累加（历史越长输入越多）。
+    输出是单次回答的估算，只保留最新值（不累加）。
+    """
+    db = _load()
+    sid = session_id or db.get("active_session_id", "")
+    if not sid:
+        return
+    s = db.setdefault("sessions", {}).setdefault(sid, {})
+    s["message_count"] = s.get("message_count", 0) + 1
+    s["input_tokens"] = s.get("input_tokens", 0) + _estimate_tokens(input_text)
+    s["output_tokens"] = _estimate_tokens(output_text)  # 只保留最新，不累加
     s["last_used_at"] = time.time()
     db["sessions"][sid] = s
     _save(db)

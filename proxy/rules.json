@@ -3,12 +3,39 @@
   "rules": [
     {
       "id": "r001",
-      "name": "标题",
+      "name": "起一个标题",
+      "match_type": "substring",
+      "scope": "request",
+      "action": "block",
       "pattern": "Write the title in the language the user wrote in, regardless of the language of the examples above.",
       "enabled": true,
       "note": "",
       "created_at": 1781803072,
-      "updated_at": 1781803072
+      "updated_at": 1781883929
+    },
+    {
+      "id": "r002",
+      "name": "系统提醒",
+      "match_type": "regex",
+      "scope": "request",
+      "action": "strip",
+      "pattern": "<system-reminder>.*?</system-reminder>",
+      "enabled": true,
+      "note": "从请求中剥离 CC 注入的 system-reminder 标签",
+      "created_at": 1781803072,
+      "updated_at": 1781878979
+    },
+    {
+      "id": "r003",
+      "name": "建议模式",
+      "match_type": "substring",
+      "scope": "request",
+      "action": "block",
+      "pattern": "[SUGGESTION MODE:",
+      "enabled": true,
+      "note": "CC 后台建议模式请求，用短前缀匹配避免格式差异",
+      "created_at": 1781879245,
+      "updated_at": 1781879245
     }
   ]
 }
