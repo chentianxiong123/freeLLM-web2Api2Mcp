@@ -12,8 +12,6 @@ from typing import Any
 
 from curl_cffi import requests as cffi_requests
 
-import config
-import session as sess
 from .pow import get_pow_response, build_request_headers
 from .login import DS_BASE, DS_HEADERS
 
@@ -304,8 +302,7 @@ def chat_completion(
         print("[Chat] No session_id, creating...")
         session_id = create_new_session(cfg)
         if session_id:
-            sess.on_new_session(session_id, model)
-            cfg = config.load_config()
+            cfg["session_id"] = session_id
 
     import traceback
     print(f"[DS-CALL] chat_completion ENTRY session={session_id[:8]} model={model} model_type={model_type} is_retry={is_retry}")

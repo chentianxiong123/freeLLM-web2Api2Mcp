@@ -10,9 +10,7 @@
 import asyncio
 from typing import AsyncIterator
 
-import config as _config
 from . import deepseek_api as ds_api
-import session as sess
 from providers.base import Event
 
 
@@ -22,7 +20,8 @@ class DeepSeekProvider:
     把 deepseek_api.chat_completion() 的同步流包装成 async Event 流。
     """
 
-    def __init__(self):
+    def __init__(self, app_config: dict | None = None):
+        self._app_config = app_config
         self._model_type_map = {
             "deepseek-v4-flash": "default",
             "deepseek-v4-pro": "expert",
@@ -32,6 +31,20 @@ class DeepSeekProvider:
         if not model:
             return "default"
         return self._model_type_map.get(model, "default")
+
+    def _build_cfg(self, account_config: dict | None) -> dict:
+        if self._app_config is not None:
+            cfg = dict(self._app_config)
+        else:
+            import config as _config
+            cfg = _config.load_config()
+        if account_config is not None:
+            cfg["token"] = account_config.get("token", cfg.get("token", ""))
+            cfg["session_id"] = account_config.get("session_id", cfg.get("session_id", ""))
+            cfg["headers"] = account_config.get("headers", cfg.get("headers", {}))
+            if account_config.get("cookie"):
+                cfg["cookie"] = account_config["cookie"]
+        return cfg
 
     async def chat(
         self,
@@ -43,17 +56,19 @@ class DeepSeekProvider:
         search_enabled: bool = False,
     ) -> AsyncIterator[Event]:
         """调用 DeepSeek API，转成 Event 流。"""
-        cfg = _config.load_config()
-        if account_config is not None:
-            cfg["token"] = account_config.get("token", cfg.get("token", ""))
-            cfg["session_id"] = account_config.get("session_id", cfg.get("session_id", ""))
-            cfg["headers"] = account_config.get("headers", cfg.get("headers", {}))
-            if account_config.get("cookie"):
-                cfg["cookie"] = account_config["cookie"]
+        cfg = self._build_cfg(account_config)
 
         if not cfg.get("token"):
             yield Event("error", {"message": "未登录 DeepSeek"})
             return
+
+        if not cfg.get("session_id"):
+            loop = asyncio.get_running_loop()
+            sid = await loop.run_in_executor(None, ds_api.create_new_session, cfg)
+            if sid:
+                import session as sess
+                sess.on_new_session(sid, model)
+                cfg["session_id"] = sid
 
         model_type = self._resolve_model_type(model)
 
@@ -84,28 +99,27 @@ class DeepSeekProvider:
                 yield Event("content", val)  # 兜底
 
     async def list_sessions(self) -> list[dict]:
-        """列出所有 session（简化版，读 sessions.json）。"""
+        import session as sess
         try:
             return sess.list_sessions()
         except Exception:
             return []
 
     async def create_session(self, label: str = "") -> str | None:
-        """创建新 session。"""
-        cfg = _config.load_config()
+        cfg = self._build_cfg(account_config=None)
         sid = ds_api.create_new_session(cfg)
         if sid and label:
+            import session as sess
             sess.register_session(sid, label=label)
             sess.activate_session(sid)
         return sid
 
     async def activate_session(self, session_id: str) -> bool:
-        """激活指定 session。"""
+        import session as sess
         return sess.activate_session(session_id)
 
     async def get_active_session(self) -> str | None:
-        """获取当前活跃 session ID。"""
-        cfg = _config.load_config()
+        cfg = self._build_cfg(account_config=None)
         return cfg.get("session_id")
 
 
