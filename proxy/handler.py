@@ -8,6 +8,8 @@
 import time
 import uuid
 
+from typing import AsyncIterator
+
 from providers.base import Event
 
 
@@ -65,7 +67,7 @@ def _build_openai_tool_call(tc: dict) -> dict:
 
 
 async def collect_response(
-    events,
+    events: AsyncIterator[Event],
     *,
     request_id: str,
     model: str,

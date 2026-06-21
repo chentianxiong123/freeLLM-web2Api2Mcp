@@ -79,7 +79,6 @@ async def run_chat_completion(
     turn = TurnRequest(
         body=body,
         headers=headers,
-        stream=stream,
         model=model,
         tools=tools,
         request_id=request_id,

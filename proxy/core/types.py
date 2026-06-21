@@ -12,7 +12,6 @@ class TurnRequest:
 
     body: dict
     headers: dict[str, str]
-    stream: bool
     model: str
     tools: list[dict]
     request_id: str

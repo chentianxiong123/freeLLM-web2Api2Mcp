@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 
-from agents.claude_code import ClaudeCodeAgent
-from agents.generic import GenericOpenAIAgent
+from typing import Any
 
-_AGENTS = {
+from agents.base import DownstreamAgent
+
+
+_AGENTS: dict[str, DownstreamAgent] = {
     "claude_code": ClaudeCodeAgent(),
     "generic": GenericOpenAIAgent(),
 }
@@ -26,7 +28,7 @@ def resolve_agent_id(headers: dict[str, str], body: dict) -> str:
     return "generic"
 
 
-def get_agent(agent_id: str | None = None, *, headers: dict | None = None, body: dict | None = None):
+def get_agent(agent_id: str | None = None, *, headers: dict | None = None, body: dict | None = None) -> DownstreamAgent:
     if agent_id:
         return _AGENTS.get(agent_id, _AGENTS["generic"])
     if headers is not None and body is not None:
