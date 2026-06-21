@@ -319,10 +319,6 @@ def chat_completion(
     # disk 才是「重启也不丢续接」的关键
     if parent_message_id is None:
         parent_message_id = _last_response_message_id.get(session_id)
-    if parent_message_id is None:
-        disk_mid = sess.get_last_message_id()
-        if disk_mid:
-            parent_message_id = disk_mid
     if parent_message_id in (None, 0, ""):
         # DeepSeek 端：用 null 表示「创建新根消息」
         parent_message_id = None
@@ -445,14 +441,6 @@ def chat_completion(
                 captured_id.append(val)
                 if capture_message_id:
                     _last_response_message_id[session_id] = val
-                    # 同步持久化到 disk（重启代理也不丢续接）
-                    try:
-                        sess.set_last_message_id(val)
-                        sess.increment_message_count()
-                        # token 用量在 react_loop 里统一按字符估算，这里不再重复加
-                    except Exception as e:
-                        print(f"[Chat] ⚠️ 写 disk 失败: {e}")
-                    print(f"[Chat] {session_id[:8]}... captured message_id={val} (内存+disk，下次续接用)")
             elif etype == "token_usage":
                 captured_tokens.append(val)
             yield (etype, val)
