@@ -31,6 +31,7 @@ class WebBackend(Protocol):
         user_content: str,
         *,
         model: str,
+        account_config: dict | None = None,
         thinking_enabled: bool = True,
         search_enabled: bool = False,
     ) -> AsyncIterator[Event]:

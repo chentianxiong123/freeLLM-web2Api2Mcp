@@ -38,11 +38,18 @@ class DeepSeekProvider:
         messages: list[dict],
         *,
         model: str = "deepseek-default",
+        account_config: dict | None = None,
         thinking_enabled: bool = True,
         search_enabled: bool = False,
     ) -> AsyncIterator[Event]:
         """调用 DeepSeek API，转成 Event 流。"""
         cfg = _config.load_config()
+        if account_config is not None:
+            cfg["token"] = account_config.get("token", cfg.get("token", ""))
+            cfg["session_id"] = account_config.get("session_id", cfg.get("session_id", ""))
+            cfg["headers"] = account_config.get("headers", cfg.get("headers", {}))
+            if account_config.get("cookie"):
+                cfg["cookie"] = account_config["cookie"]
 
         if not cfg.get("token"):
             yield Event("error", {"message": "未登录 DeepSeek"})

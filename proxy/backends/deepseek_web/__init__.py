@@ -28,6 +28,7 @@ class DeepSeekWebBackend:
         user_content: str,
         *,
         model: str,
+        account_config: dict | None = None,
         thinking_enabled: bool = True,
         search_enabled: bool = False,
     ) -> AsyncIterator[Event]:
@@ -35,6 +36,7 @@ class DeepSeekWebBackend:
         async for ev in self._provider.chat(
             messages,
             model=model,
+            account_config=account_config,
             thinking_enabled=thinking_enabled,
             search_enabled=search_enabled,
         ):

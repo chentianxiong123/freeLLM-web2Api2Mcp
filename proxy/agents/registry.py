@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 
-from typing import Any
-
 from agents.base import DownstreamAgent
+from agents.claude_code import ClaudeCodeAgent
+from agents.generic import GenericOpenAIAgent
 
 
 _AGENTS: dict[str, DownstreamAgent] = {

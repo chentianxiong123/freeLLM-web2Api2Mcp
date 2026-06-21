@@ -7,6 +7,7 @@ import uuid
 
 from fastapi.responses import JSONResponse
 
+import accounts
 import approval
 import rules
 import session as sess
@@ -118,10 +119,12 @@ async def run_chat_completion(
     final_user_content = cleaned_content or "(empty after strip)"
 
     t0 = time.time()
+    account_config = accounts.get_account_config()
     collected = []
     async for ev in backend.chat_turn(
         final_user_content,
         model=model,
+        account_config=account_config,
         thinking_enabled=True,
         search_enabled=False,
     ):
