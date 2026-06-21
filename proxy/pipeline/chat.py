@@ -149,7 +149,7 @@ async def run_chat_completion(
     if filtered != output_text or hits:
         final_resp["choices"][0]["message"]["content"] = filtered or None
 
-    sess.track_message(final_user_content, output_text)
+    sess.track_message(final_user_content, output_text, session_id=account_config.get("session_id"))
     duration_ms = (time.time() - t0) * 1000
 
     resp_result = await approval.queue.intercept_response(

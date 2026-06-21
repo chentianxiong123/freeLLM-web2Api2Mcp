@@ -77,6 +77,7 @@ def get_account_config() -> dict:
     if not acc:
         return {}
     return {
+        "id": acc.get("id", ""),
         "token": acc.get("token", ""),
         "session_id": acc.get("session_id", ""),
         "headers": acc.get("headers", {}),

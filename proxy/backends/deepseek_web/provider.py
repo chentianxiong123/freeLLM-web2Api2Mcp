@@ -66,8 +66,13 @@ class DeepSeekProvider:
             loop = asyncio.get_running_loop()
             sid = await loop.run_in_executor(None, ds_api.create_new_session, cfg)
             if sid:
-                import session as sess
-                sess.on_new_session(sid, model)
+                acc_id = cfg.get("id")
+                if acc_id:
+                    import accounts as _accounts
+                    _accounts.update_account(acc_id, {"session_id": sid})
+                else:
+                    import session as sess
+                    sess.on_new_session(sid, model)
                 cfg["session_id"] = sid
 
         model_type = self._resolve_model_type(model)
