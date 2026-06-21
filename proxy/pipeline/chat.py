@@ -114,11 +114,7 @@ async def run_chat_completion(
     final_user_content = cleaned_content or "(empty after strip)"
 
     t0 = time.time()
-    account_id = body.get("account_id")
-    if account_id:
-        account_config = accounts.get_account_by_id(account_id)
-    else:
-        account_config = accounts.get_account_config()
+    account_config = accounts.get_account_config()
     if not account_config.get("token"):
         return JSONResponse(status_code=401, content={
             "error": {"message": "No active account", "type": "authentication_error"},
