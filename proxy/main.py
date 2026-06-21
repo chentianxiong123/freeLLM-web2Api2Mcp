@@ -12,7 +12,7 @@ import uuid
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 from debug_interceptor import interceptor
 from backends.deepseek_web.login import login as ds_login
@@ -60,27 +60,26 @@ async def debug_middleware(request: Request, call_next):
     except Exception:
         pass
 
-    # ── 落地原始 body 到 debug_requests/，跳过 housekeeping ──
+    # ── 落地原始 body 到 debug_requests/ ─────────────────
     if path == "/v1/chat/completions" and isinstance(body, dict):
+        import os as _os_dl
+        from datetime import datetime as _dt_dl
+        _dl_dir = _os_dl.path.join(_os_dl.path.dirname(_os_dl.path.abspath(__file__)), "debug_requests")
         try:
-            from handler import check_housekeeping as _chk_hk
-            if _chk_hk(body):
-                print(f"[DEBUG-DUMP] SKIPPED housekeeping request")
-            else:
-                import os as _os_dl
-                from datetime import datetime as _dt_dl
-                _dl_dir = _os_dl.path.join(_os_dl.path.dirname(_os_dl.path.abspath(__file__)), "debug_requests")
-                _os_dl.makedirs(_dl_dir, exist_ok=True)
-                _ts = _dt_dl.now().strftime("%Y%m%dT%H%M%S")
-                _dl_name = f"{_ts}_{uuid.uuid4().hex[:6]}.json"
-                with open(_os_dl.path.join(_dl_dir, _dl_name), "w", encoding="utf-8") as _f:
-                    json.dump({
-                        "ts": _ts,
-                        "path": path,
-                        "headers": {k: v for k, v in request.headers.items() if k.lower() not in ("authorization", "cookie")},
-                        "body": body,
-                    }, _f, ensure_ascii=False, indent=2)
-                print(f"[DEBUG-DUMP] wrote {_dl_name} (body.messages={len(body.get('messages', []))})")
+            _os_dl.makedirs(_dl_dir, exist_ok=True)
+        except OSError:
+            pass
+        _ts = _dt_dl.now().strftime("%Y%m%dT%H%M%S")
+        _dl_name = f"{_ts}_{uuid.uuid4().hex[:6]}.json"
+        try:
+            with open(_os_dl.path.join(_dl_dir, _dl_name), "w", encoding="utf-8") as _f:
+                json.dump({
+                    "ts": _ts,
+                    "path": path,
+                    "headers": {k: v for k, v in request.headers.items() if k.lower() not in ("authorization", "cookie")},
+                    "body": body,
+                }, _f, ensure_ascii=False, indent=2)
+            print(f"[DEBUG-DUMP] wrote {_dl_name} (body.messages={len(body.get('messages', []))})")
         except Exception as _e_dl:
             print(f"[DEBUG-DUMP] FAILED: {_e_dl}")
 

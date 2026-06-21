@@ -55,12 +55,7 @@ async def api_activate_account(acc_id: str):
 
 @router.post("/api/accounts/login/{acc_id}")
 async def api_login_account(acc_id: str, request: Request):
-    accs = accounts._load()
-    target = None
-    for acc in accs:
-        if acc.get("id") == acc_id:
-            target = acc
-            break
+    target = accounts.get_account_by_id(acc_id)
     if not target:
         return JSONResponse(status_code=404, content={"ok": False, "error": "账号不存在"})
 

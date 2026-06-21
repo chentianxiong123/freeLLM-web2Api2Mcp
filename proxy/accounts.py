@@ -54,6 +54,14 @@ def list_accounts() -> list[dict]:
     ]
 
 
+def get_account_by_id(acc_id: str) -> dict | None:
+    """按 ID 查找账号（含敏感字段）。"""
+    for acc in _load():
+        if acc.get("id") == acc_id:
+            return acc
+    return None
+
+
 def get_active_account() -> dict | None:
     """获取当前活跃账号（含 token/headers，用于 API 调用）。"""
     accounts = _load()

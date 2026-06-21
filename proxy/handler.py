@@ -91,21 +91,7 @@ def build_ds_input(body: dict) -> ChatRequest:
     return ChatRequest(user_content="", is_react_continuation=False, tool_call_ids=[])
 
 
-# ── 2. 拦截：housekeeping / rules ─────────────────────────
-
-
-def check_housekeeping(body: dict) -> bool:
-    """Claude Code 后台 housekeeping？直接挡。"""
-    try:
-        import gateway
-        result = gateway.is_claude_housekeeping_request(body)
-        print(f"[check_housekeeping] result={result}")
-        return result
-    except Exception as e:
-        print(f"[check_housekeeping] EXCEPTION: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+# ── 2. 拦截：rules ──────────────────────────────────────
 
 
 def check_rules(body: dict) -> tuple[bool, dict | None]:

@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
-from typing import Any, AsyncIterator
 
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 
 import approval
 import rules
@@ -41,34 +39,19 @@ def _last_user_preview(msgs: list) -> str:
     return ""
 
 
-async def stream_empty_sse(empty_resp: dict) -> AsyncIterator[bytes]:
-    yield f"data: {json.dumps(empty_resp, ensure_ascii=False)}\n\n".encode()
-    yield b"data: [DONE]\n\n"
-
-
 async def run_chat_completion(
     *,
     body: dict,
     headers: dict[str, str],
-) -> Any:
-    """返回 JSONResponse 或 StreamingResponse。"""
+) -> JSONResponse:
+    """返回 JSONResponse（不支持流式）。"""
     backend = get_backend()
     agent = get_agent(headers=headers, body=body)
 
     rid, request_id = _next_rid()
-    stream = bool(body.get("stream", False))
     tools = body.get("tools", []) or []
     msgs = body.get("messages", []) or []
     model = backend.active_model()
-
-    if stream and not agent.should_handle_stream(body):
-        print(f"[{rid}] STREAM-SKIP agent={agent.id}")
-        empty = agent.empty_stream_response(body, request_id)
-        return StreamingResponse(
-            stream_empty_sse(empty),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-        )
 
     print(
         f"[{rid}] agent={agent.id} backend={backend.id} model={model} "

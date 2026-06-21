@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 import gateway
 from handler import build_ds_input
 
@@ -14,23 +12,6 @@ class GenericOpenAIAgent:
 
     def detect(self, headers: dict[str, str], body: dict) -> bool:
         return True
-
-    def should_handle_stream(self, body: dict) -> bool:
-        return bool(body.get("stream"))
-
-    def empty_stream_response(self, body: dict, request_id: str) -> dict:
-        return {
-            "id": request_id,
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": body.get("model", "deepseek-v4-flash"),
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": ""},
-                "finish_reason": "stop",
-            }],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        }
 
     def extract_upstream_turn(self, body: dict) -> tuple[str, bool, list[str]]:
         req = build_ds_input(body)
