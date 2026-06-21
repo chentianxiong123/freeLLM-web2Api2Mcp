@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import gateway
-from handler import build_ds_input
+from request_parser import build_ds_input
 
 
 class ClaudeCodeAgent:
