@@ -52,7 +52,7 @@ async def run_chat_completion(
     rid, request_id = _next_rid()
     tools = body.get("tools", []) or []
     msgs = body.get("messages", []) or []
-    model = backend.active_model()
+    model = body.get("model") or backend.active_model()
 
     print(
         f"[{rid}] agent={agent.id} backend={backend.id} model={model} "
@@ -71,11 +71,6 @@ async def run_chat_completion(
         rule_name = hit_rule.get("name", "?") if hit_rule else "?"
         print(f"[{rid}] BLOCKED rule={rule_name}")
         return JSONResponse(content=make_skip_response(model, request_id, f"rule:{rule_name}"))
-
-    if not backend.is_authenticated():
-        return JSONResponse(status_code=401, content={
-            "error": {"message": "No active account", "type": "authentication_error"},
-        })
 
     turn = TurnRequest(
         body=body,
@@ -119,7 +114,15 @@ async def run_chat_completion(
     final_user_content = cleaned_content or "(empty after strip)"
 
     t0 = time.time()
-    account_config = accounts.get_account_config()
+    account_id = body.get("account_id")
+    if account_id:
+        account_config = accounts.get_account_by_id(account_id)
+    else:
+        account_config = accounts.get_account_config()
+    if not account_config.get("token"):
+        return JSONResponse(status_code=401, content={
+            "error": {"message": "No active account", "type": "authentication_error"},
+        })
     collected = []
     async for ev in backend.chat_turn(
         final_user_content,
