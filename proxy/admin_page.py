@@ -648,6 +648,7 @@ def render_tools():
     <h2>🎮 工具配置 <span id="toolConfigStatus" style="font-size:10px;color:#999;font-weight:400"></span></h2>
     <div class="actions">
       <button class="btn-ghost btn-sm" onclick="refreshToolConfig()">🔃 刷新</button>
+      <button class="btn-ghost btn-sm" onclick="resetToolDefaults()">↩ 恢复默认</button>
       <button class="btn-primary btn-sm" onclick="initTools()">📤 发送初始化</button>
     </div>
   </div>
@@ -689,18 +690,21 @@ async function refreshToolConfig() {
         var sectionsHtml = sections.map((sec, i) => {
             var isTools = sec.id === 'tools';
             var content = sec.content || '';
+            var title = sec.title || sec.id || ('环节 ' + (i+1));
             return '<div style="padding:8px;background:#fafafa;border-radius:4px;margin-bottom:6px;border-left:2px solid ' + (sec.enabled ? '#1677ff' : '#d9d9d9') + '">'
+                + '<input type="hidden" id="sec_id_' + i + '" value="' + escapeHtml(sec.id||'') + '">'
+                + '<input type="hidden" id="sec_title_' + i + '" value="' + escapeHtml(title) + '">'
                 + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
                 + '<label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">'
                 + '<input type="checkbox" id="sec_chk_' + i + '" ' + (sec.enabled ? 'checked' : '') + ' onchange="toggleSection(' + i + ')">'
-                + '<span style="font-weight:600">' + escapeHtml(sec.title || sec.id) + '</span>'
+                + '<span style="font-weight:600">' + escapeHtml(title) + '</span>'
                 + '</label>'
-                + '<span style="font-size:10px;color:#999">#' + sec.id + '</span>'
+                + '<span style="font-size:10px;color:#999">#' + escapeHtml(sec.id || '-') + '</span>'
                 + '<span style="font-size:10px;color:' + (sec.enabled ? '#52c41a' : '#999') + '">' + (sec.enabled ? '✅ 开启' : '⛔ 关闭') + '</span>'
                 + '</div>'
                 + (isTools
                     ? '<div style="font-size:10px;color:#888;padding:4px 6px;background:#f0f0f0;border-radius:3px">自动从工具定义生成</div>'
-                    : '<textarea id="sec_txt_' + i + '" rows="2" style="width:100%;padding:6px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:11px">' + escapeHtml(content) + '</textarea>')
+                    : '<textarea id="sec_txt_' + i + '" rows="6" style="width:100%;min-height:80px;padding:6px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:11px">' + escapeHtml(content) + '</textarea>')
                 + '</div>';
         }).join('');
 
@@ -798,10 +802,13 @@ function getSectionsFromUI() {
     var secs = [];
     var i = 0;
     while ($('sec_chk_' + i)) {
+        var idEl = $('sec_id_' + i);
+        var titleEl = $('sec_title_' + i);
         var sec = {
-            id: '',
+            id: idEl ? idEl.value : '',
             enabled: $('sec_chk_' + i).checked,
-            title: '',
+            title: titleEl ? titleEl.value : '',
+            content: '',
         };
         var txt = $('sec_txt_' + i);
         sec.content = txt ? txt.value : '';
@@ -823,6 +830,16 @@ async function saveSectionsToServer(secs) {
 async function saveSections() {
     var secs = getSectionsFromUI();
     await saveSectionsToServer(secs);
+}
+
+async function resetToolDefaults() {
+    if (!confirm('恢复默认模板？当前环节与工具定义将被覆盖。')) return;
+    try {
+        var r = await fetch('/api/tool-config/reset-defaults', { method:'POST' });
+        var d = await r.json();
+        if (d.ok) { showToast('✅ 已恢复默认', true); refreshToolConfig(); }
+        else showToast('❌ 失败', false);
+    } catch(e) { showToast('❌ ' + e.message, false); }
 }
 
 async function previewInit() {

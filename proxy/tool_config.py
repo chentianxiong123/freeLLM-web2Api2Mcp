@@ -189,13 +189,38 @@ def _save(data: dict) -> None:
 
 
 def get_config() -> dict:
-    return _load()
+    data = _load()
+    if "sections" in data:
+        data["sections"] = merge_sections_with_defaults(data["sections"])
+    return data
+
+
+def merge_sections_with_defaults(sections: list[dict]) -> list[dict]:
+    """用 DEFAULT_SECTIONS 补全缺失的 id/title，避免 admin 保存丢字段。"""
+    defaults = {s["id"]: s for s in DEFAULT_SECTIONS if s.get("id")}
+    out = []
+    for i, sec in enumerate(sections):
+        sid = (sec.get("id") or "").strip()
+        if not sid and i < len(DEFAULT_SECTIONS):
+            d = DEFAULT_SECTIONS[i]
+            sec = {**d, **sec, "id": d["id"], "title": sec.get("title") or d.get("title", "")}
+        elif sid in defaults:
+            d = defaults[sid]
+            sec = {**d, **sec, "title": sec.get("title") or d.get("title", "")}
+        out.append(sec)
+    return out
+
+
+def reset_to_defaults() -> dict:
+    data = _default_data()
+    _save(data)
+    return data
 
 
 def update_config(patch: dict) -> dict:
     data = _load()
     if "sections" in patch:
-        data["sections"] = patch["sections"]
+        data["sections"] = merge_sections_with_defaults(patch["sections"])
     if "tools" in patch:
         data["tools"] = patch["tools"]
     data["updated_at"] = int(time.time())
