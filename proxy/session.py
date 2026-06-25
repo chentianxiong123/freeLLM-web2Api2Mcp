@@ -194,8 +194,13 @@ def list_sessions(account_id: str = "") -> list[dict]:
         # 如果指定了 account_id，只返回该账号的 session
         if account_id and s.get("account_id", "") != account_id:
             continue
-        inp = s.get("input_tokens", 0)
+        new_inp = s.get("new_input_tokens", 0)
+        cached = s.get("cached_tokens", 0)
         out_t = s.get("output_tokens", 0)
+        # 兼容旧字段
+        old_inp = s.get("input_tokens", 0)
+        if old_inp and not new_inp:
+            new_inp = old_inp
         out.append({
             "session_id": sid,
             "active": sid == sid_active,
@@ -203,9 +208,10 @@ def list_sessions(account_id: str = "") -> list[dict]:
             "model": s.get("model", "deepseek-v4-flash"),
             "last_message_id": s.get("last_message_id"),
             "message_count": s.get("message_count", 0),
-            "input_tokens": inp,
+            "new_input_tokens": new_inp,
+            "cached_tokens": cached,
             "output_tokens": out_t,
-            "total_tokens": inp + out_t,
+            "total_tokens": new_inp + cached + out_t,
             "created_at": s.get("created_at"),
             "last_used_at": s.get("last_used_at"),
             "account_id": s.get("account_id", ""),
@@ -311,20 +317,40 @@ def increment_message_count(session_id: str | None = None) -> None:
     _save(db)
 
 
-def track_message(input_text: str, output_text: str = "", session_id: str | None = None) -> None:
+def track_message(
+    input_text: str,
+    output_text: str = "",
+    thinking_text: str = "",
+    session_id: str | None = None,
+) -> None:
     """记录一次消息交换的 token 用量。
 
-    输入按字符估算，持续累加（历史越长输入越多，显示总用量）。
-    输出按字符估算，持续累加（显示总用量）。
+    计算方式（估算降级）：
+      - new_input_tokens: 本次新输入的 token（用户发的内容）
+      - cached_tokens: 历史的输入+输出（之前的消息，被缓存了）
+      - output_tokens: 本次输出 = 思考 + 回复
+
+    思考不会被保存到历史，但计入本次输出。
     """
     db = _load()
     sid = session_id or db.get("active_session_id", "")
     if not sid:
         return
     s = db.setdefault("sessions", {}).setdefault(sid, {})
+
+    # 本次新输入
+    new_input = _estimate_tokens(input_text)
+    # 本次输出 = 思考 + 回复
+    thinking_tok = _estimate_tokens(thinking_text)
+    output_tok = _estimate_tokens(output_text)
+    total_output = thinking_tok + output_tok
+
+    # 累加
     s["message_count"] = s.get("message_count", 0) + 1
-    s["input_tokens"] = s.get("input_tokens", 0) + _estimate_tokens(input_text)
-    s["output_tokens"] = s.get("output_tokens", 0) + _estimate_tokens(output_text)
+    s["new_input_tokens"] = s.get("new_input_tokens", 0) + new_input
+    s["output_tokens"] = s.get("output_tokens", 0) + total_output
+    # cached_tokens = 之前累计的输入+输出（历史部分）
+    s["cached_tokens"] = s.get("cached_tokens", 0) + s.get("new_input_tokens", 0) - new_input + s.get("output_tokens", 0) - total_output
     s["last_used_at"] = time.time()
     db["sessions"][sid] = s
     _save(db)

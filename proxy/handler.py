@@ -151,8 +151,10 @@ async def collect_response(
         message["content"] = remaining_text or None
         finish_reason = "stop"
 
-    # thinking
+    # thinking → 放在 message.reasoning_content（OpenAI 标准）
     thinking_text = "\n".join(thinking_parts) if thinking_parts else None
+    if thinking_text:
+        message["reasoning_content"] = thinking_text
 
     # usage
     full_content = "".join(content_parts)
@@ -172,9 +174,6 @@ async def collect_response(
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
         "usage": usage,
     }
-
-    if thinking_text:
-        result["thinking"] = thinking_text
 
     return result
 

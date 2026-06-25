@@ -123,6 +123,7 @@ async def run_chat_completion(
 
     if stream:
         captured_content: list[str] = []
+        captured_thinking: list[str] = []
 
         async def _capture_events():
             async for ev in backend.chat_turn(
@@ -134,6 +135,8 @@ async def run_chat_completion(
             ):
                 if ev.type == "content" and isinstance(ev.val, str):
                     captured_content.append(ev.val)
+                elif ev.type == "thinking" and isinstance(ev.val, str):
+                    captured_thinking.append(ev.val)
                 yield ev
 
         from handler import stream_response as _sr
@@ -142,7 +145,13 @@ async def run_chat_completion(
             async for line in _sr(_capture_events(), request_id=request_id, model=model):
                 yield line
             output_text = "".join(captured_content)
-            sess.track_message(final_user_content, output_text, session_id=account_config.get("session_id"))
+            thinking_text = "".join(captured_thinking)
+            sess.track_message(
+                final_user_content,
+                output_text,
+                thinking_text=thinking_text,
+                session_id=account_config.get("session_id"),
+            )
 
         return StreamingResponse(
             _sse_stream(),
@@ -177,11 +186,17 @@ async def run_chat_completion(
     )
 
     output_text = final_resp.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+    thinking_text = final_resp.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "") or ""
     filtered, hits = rules.filter_response(output_text)
     if filtered != output_text or hits:
         final_resp["choices"][0]["message"]["content"] = filtered or None
 
-    sess.track_message(final_user_content, output_text, session_id=account_config.get("session_id"))
+    sess.track_message(
+        final_user_content,
+        output_text,
+        thinking_text=thinking_text,
+        session_id=account_config.get("session_id"),
+    )
     duration_ms = (time.time() - t0) * 1000
 
     resp_result = await approval.queue.intercept_response(
