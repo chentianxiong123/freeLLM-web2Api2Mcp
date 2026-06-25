@@ -107,6 +107,7 @@ async def collect_response(
     tools_schema: list[dict] | None = None,
     tool_codec_id: str = "deepseek_natural",
     input_text: str = "",
+    full_context_text: str = "",
 ) -> dict:
     """收集所有事件，返回完整的 OpenAI 响应 dict。"""
     thinking_parts: list[str] = []
@@ -179,14 +180,16 @@ async def collect_response(
     thinking_text_for_usage = "\n".join(thinking_parts) if thinking_parts else ""
     _est = lambda t: max(1, len(t) // 2) if t else 0
     prompt_est = _est(input_text)
+    context_est = _est(full_context_text)
+    cached_est = max(0, context_est - prompt_est)
     completion_est = _est(full_content)
     reasoning_est = _est(thinking_text_for_usage)
     usage = {
         "prompt_tokens": prompt_est,
         "completion_tokens": completion_est + reasoning_est,
-        "total_tokens": prompt_est + completion_est + reasoning_est,
+        "total_tokens": prompt_est + cached_est + completion_est + reasoning_est,
         "prompt_tokens_details": {
-            "cached_tokens": 0,
+            "cached_tokens": cached_est,
         },
         "completion_tokens_details": {
             "reasoning_tokens": reasoning_est,
@@ -238,6 +241,7 @@ async def stream_response(
     request_id: str,
     model: str,
     input_text: str = "",
+    full_context_text: str = "",
 ) -> AsyncIterator[str]:
     """将 Provider Event 流转换为 OpenAI SSE 消息。
 
@@ -282,14 +286,16 @@ async def stream_response(
     thinking_text = "\n".join(thinking_parts) if thinking_parts else ""
     _est = lambda t: max(1, len(t) // 2) if t else 0
     prompt_est = _est(input_text)
+    context_est = _est(full_context_text)
+    cached_est = max(0, context_est - prompt_est)
     completion_est = _est(full_content)
     reasoning_est = _est(thinking_text)
     usage = {
         "prompt_tokens": prompt_est,
         "completion_tokens": completion_est + reasoning_est,
-        "total_tokens": prompt_est + completion_est + reasoning_est,
+        "total_tokens": prompt_est + cached_est + completion_est + reasoning_est,
         "prompt_tokens_details": {
-            "cached_tokens": 0,
+            "cached_tokens": cached_est,
         },
         "completion_tokens_details": {
             "reasoning_tokens": reasoning_est,

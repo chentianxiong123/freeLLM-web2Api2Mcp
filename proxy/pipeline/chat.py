@@ -128,6 +128,17 @@ async def run_chat_completion(
     cleaned_content, _strip_hits = rules.clean_request_content(final_user_content)
     final_user_content = cleaned_content or "(empty after strip)"
 
+    # 构建完整上下文文本（所有 messages 拼接），用于计算 cached_tokens
+    full_context_text = ""
+    for m in msgs:
+        c = m.get("content", "")
+        if isinstance(c, str):
+            full_context_text += c + "\n"
+        elif isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    full_context_text += (b.get("text", "") or "") + "\n"
+
     account_config = accounts.get_account_config()
     if not account_config.get("token"):
         return JSONResponse(status_code=401, content={
@@ -158,7 +169,7 @@ async def run_chat_completion(
         from handler import stream_response as _sr
 
         async def _sse_stream():
-            async for line in _sr(_capture_events(), request_id=request_id, model=actual_model, input_text=final_user_content):
+            async for line in _sr(_capture_events(), request_id=request_id, model=actual_model, input_text=final_user_content, full_context_text=full_context_text):
                 yield line
             output_text = "".join(captured_content)
             thinking_text = "".join(captured_thinking)
@@ -200,6 +211,7 @@ async def run_chat_completion(
         tools_schema=tools,
         tool_codec_id=backend.tool_codec_id(),
         input_text=final_user_content,
+        full_context_text=full_context_text,
     )
 
     output_text = final_resp.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
