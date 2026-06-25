@@ -207,9 +207,10 @@ def render_overview(cfg, usage):
     current_backend = cfg.get('backend', 'deepseek')
     current_model = cfg.get('model', 'deepseek-v4-flash')
     backend_display = "DeepSeek" if current_backend == "deepseek" else "Qwen"
-    inp_t = usage.get('input_tokens', 0)
+    new_inp = usage.get('new_input_tokens', 0)
+    cached = usage.get('cached_tokens', 0)
     out_t = usage.get('output_tokens', 0)
-    tot_t = usage.get('total_tokens', inp_t + out_t)
+    tot_t = usage.get('total_tokens', new_inp + cached + out_t)
     msg_c = usage.get('message_count', 0)
     port = cfg.get('port', 48391)
 
@@ -239,9 +240,10 @@ def render_overview(cfg, usage):
     content = f"""<div class="card">
   <h2>📊 系统概览</h2>
   <div class="status-row"><span class="lbl">端口</span><span class="val">{port}</span></div>
-  <div class="status-row"><span class="lbl">累计输入 Tokens</span><span class="val">{inp_t:,}</span></div>
-  <div class="status-row"><span class="lbl">累计输出 Tokens</span><span class="val">{out_t:,}</span></div>
-  <div class="status-row"><span class="lbl">累计总 Tokens</span><span class="val">{tot_t:,}</span></div>
+  <div class="status-row"><span class="lbl">新输入 Tokens</span><span class="val">{new_inp:,}</span></div>
+  <div class="status-row"><span class="lbl">缓存 Tokens</span><span class="val">{cached:,}</span></div>
+  <div class="status-row"><span class="lbl">输出 Tokens</span><span class="val">{out_t:,}</span></div>
+  <div class="status-row"><span class="lbl">总 Tokens</span><span class="val">{tot_t:,}</span></div>
   <div class="status-row"><span class="lbl">消息数</span><span class="val">{msg_c}</span></div>
 </div>
 

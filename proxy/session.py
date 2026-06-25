@@ -92,12 +92,11 @@ def get_usage_status() -> dict:
     db = _load()
     sid = db.get("active_session_id", "")
     s = db.get("sessions", {}).get(sid, {})
-    inp = s.get("input_tokens", 0)
-    out = s.get("output_tokens", 0)
     return {
-        "input_tokens": inp,
-        "output_tokens": out,
-        "total_tokens": inp + out,
+        "new_input_tokens": s.get("new_input_tokens", 0),
+        "cached_tokens": s.get("cached_tokens", 0),
+        "output_tokens": s.get("output_tokens", 0),
+        "total_tokens": s.get("new_input_tokens", 0) + s.get("cached_tokens", 0) + s.get("output_tokens", 0),
         "message_count": s.get("message_count", 0),
     }
 
@@ -116,7 +115,8 @@ def on_new_session(session_id: str, model: str = "", account_id: str = "") -> No
             "model": model or "deepseek-v4-flash",
             "last_message_id": None,
             "message_count": 0,
-            "input_tokens": 0,
+            "new_input_tokens": 0,
+            "cached_tokens": 0,
             "output_tokens": 0,
             "created_at": now,
             "last_used_at": now,
@@ -197,10 +197,6 @@ def list_sessions(account_id: str = "") -> list[dict]:
         new_inp = s.get("new_input_tokens", 0)
         cached = s.get("cached_tokens", 0)
         out_t = s.get("output_tokens", 0)
-        # 兼容旧字段
-        old_inp = s.get("input_tokens", 0)
-        if old_inp and not new_inp:
-            new_inp = old_inp
         out.append({
             "session_id": sid,
             "active": sid == sid_active,
@@ -257,7 +253,8 @@ def register_session(session_id: str, label: str = "", model: str = "", account_
             "model": model or "deepseek-v4-flash",
             "last_message_id": None,
             "message_count": 0,
-            "input_tokens": 0,
+            "new_input_tokens": 0,
+            "cached_tokens": 0,
             "output_tokens": 0,
             "created_at": now,
             "last_used_at": now,
