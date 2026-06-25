@@ -36,6 +36,18 @@
       "note": "CC 后台建议模式请求，用短前缀匹配避免格式差异",
       "created_at": 1781879245,
       "updated_at": 1781879245
+    },
+    {
+      "id": "r004",
+      "name": "COMPACT",
+      "match_type": "substring",
+      "scope": "request",
+      "action": "intercept",
+      "pattern": "Your task is to create a detailed summary of the conversation so far",
+      "enabled": true,
+      "note": "检测 Claude Code 的 /compact 压缩请求，触发上游会话重置",
+      "created_at": 1781883929,
+      "updated_at": 1781883929
     }
   ]
 }

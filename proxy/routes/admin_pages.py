@@ -1,5 +1,5 @@
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 
 import config
 import session as sess
@@ -33,12 +33,6 @@ async def admin_rules():
     return HTMLResponse(render_rules())
 
 
-@router.get("/admin/tools")
-async def admin_tools():
-    from admin_page import render_tools
-    return HTMLResponse(render_tools())
-
-
 @router.get("/admin/parser-flow")
 async def admin_parser_flow():
     from admin_page import render_parser_flow
@@ -49,3 +43,24 @@ async def admin_parser_flow():
 async def admin_debug():
     from admin_page import render_debug
     return HTMLResponse(render_debug())
+
+
+@router.get("/admin/prompts")
+async def admin_prompts():
+    from admin_page import render_prompts
+    return HTMLResponse(render_prompts())
+
+
+@router.get("/api/prompts")
+async def api_get_prompts():
+    from prompts import manager
+    return JSONResponse(content=manager.get_all_prompts())
+
+
+@router.put("/api/prompts/{name}")
+async def api_set_prompt(name: str, request: Request):
+    from prompts import manager
+    body = await request.json()
+    content = body.get("content", "")
+    manager.set_prompt(name, content)
+    return JSONResponse(content={"ok": True, "name": name})

@@ -5,7 +5,7 @@ import accounts
 import config
 from backends.registry import get_backend
 import session as sess
-import tool_config
+from prompts import manager as tool_config
 
 router = APIRouter(tags=["tools"])
 

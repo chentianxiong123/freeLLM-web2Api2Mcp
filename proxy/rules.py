@@ -77,7 +77,7 @@ def add_rule(rule: dict) -> dict:
     if scope not in ("request", "response"):
         scope = "request"
     action = rule.get("action", "block")
-    if action not in ("block", "strip"):
+    if action not in ("block", "strip", "intercept"):
         action = "block"
 
     now = int(time.time())
@@ -103,7 +103,7 @@ def update_rule(rule_id: str, patch: dict) -> dict | None:
     rules = data.setdefault("rules", [])
     valid_match_types = ("substring", "regex")
     valid_scopes = ("request", "response")
-    valid_actions = ("block", "strip")
+    valid_actions = ("block", "strip", "intercept")
     for r in rules:
         if r.get("id") == rule_id:
             for k in ("name", "match_type", "scope", "action", "pattern", "enabled", "note"):
@@ -170,6 +170,18 @@ DEFAULT_RULES = [
         "created_at": 0,
         "updated_at": 0,
     },
+    {
+        "id": "r003",
+        "name": "COMPACT",
+        "match_type": "substring",
+        "scope": "request",
+        "action": "intercept",
+        "pattern": "Your task is to create a detailed summary of the conversation so far",
+        "enabled": True,
+        "note": "检测 Claude Code 的 /compact 压缩请求，触发上游会话重置",
+        "created_at": 0,
+        "updated_at": 0,
+    },
 ]
 
 
@@ -207,7 +219,7 @@ def _extract_user_text(body: dict) -> str:
 
 
 def is_blocked(body: dict, clean_prompt: str) -> tuple[bool, dict | None]:
-    """检查请求是否被拦截（只匹配 scope=request 的规则）。"""
+    """检查请求是否被拦截（只匹配 scope=request 的 block 规则）。"""
     text = _extract_user_text(body) + "\n" + clean_prompt
     if not text:
         return False, None
@@ -235,6 +247,41 @@ def is_blocked(body: dict, clean_prompt: str) -> tuple[bool, dict | None]:
             continue
 
     return False, None
+
+
+def find_intercept_rule(body: dict) -> dict | None:
+    """查找匹配的 intercept 规则（scope=request, action=intercept）。
+
+    用于检测 /compact 等需要特殊处理的请求。
+    返回匹配的规则 dict，无匹配返回 None。
+    """
+    text = _extract_user_text(body)
+    if not text:
+        return None
+
+    for r in list_rules():
+        if not r.get("enabled", True):
+            continue
+        if r.get("scope", "request") != "request":
+            continue
+        if r.get("action") != "intercept":
+            continue
+        pattern = r.get("pattern", "").strip()
+        if not pattern:
+            continue
+        match_type = r.get("match_type", "substring")
+
+        try:
+            if match_type == "regex":
+                if re.search(pattern, text, re.DOTALL | re.IGNORECASE):
+                    return r
+            else:
+                if pattern.lower() in text.lower():
+                    return r
+        except re.error:
+            continue
+
+    return None
 
 
 def clean_request_content(content: str) -> tuple[str, list[dict]]:

@@ -125,7 +125,7 @@ def _sidebar(active_page):
         ("/admin/accounts", "👤", "账号"),
         ("/admin/sessions", "💬", "会话"),
         ("/admin/rules", "🛡️", "规则"),
-        ("/admin/tools", "🎮", "工具"),
+        ("/admin/prompts", "📝", "提示词"),
         ("/admin/parser-flow", "🔧", "解析器"),
         ("/admin/debug", "🔍", "调试"),
     ]
@@ -639,13 +639,17 @@ function renderRuleCard(r) {
     var scopeBadge = scope === 'response'
         ? '<span class="tag" style="background:#f6ffed;color:#389e0d">响应</span>'
         : '<span class="tag" style="background:#f0f5ff;color:#1d39c4">请求</span>';
+    var act = r.action || 'block';
+    var actLabel = act === 'block' ? '拦' : act === 'strip' ? '剥' : '截';
+    var actColor = act === 'block' ? '#ff4d4f' : act === 'strip' ? '#faad14' : '#722ed1';
+    var actBadge = '<span class="tag" style="background:' + actColor + '11;color:' + actColor + '">' + actLabel + '</span>';
     var pat = r.pattern ? '<code style="background:#f5f5f5;padding:1px 4px;border-radius:3px;font-size:10px">' + escapeHtml(r.pattern) + '</code>' : '';
     var toggleBtn = r.enabled
         ? '<button class="btn-ghost btn-sm" onclick="toggleRule(\\'' + r.id + '\\',false)">停用</button>'
         : '<button class="btn-primary btn-sm" onclick="toggleRule(\\'' + r.id + '\\',true)">启用</button>';
     return '<div class="item-card" style="' + (r.enabled ? '' : 'opacity:.6') + '">'
         + '<div class="item-head"><div class="item-info">'
-        + '<div class="item-title">' + badge + ' ' + mtBadge + ' ' + scopeBadge + ' <b>' + escapeHtml(r.name) + '</b></div>'
+        + '<div class="item-title">' + badge + ' ' + mtBadge + ' ' + scopeBadge + ' ' + actBadge + ' <b>' + escapeHtml(r.name) + '</b></div>'
         + '<div class="item-meta">' + pat + (r.note ? ' · ' + escapeHtml(r.note) : '') + '</div>'
         + '</div><div class="item-actions">' + toggleBtn
         + '<button class="btn-ghost btn-sm" onclick="openRuleForm(\\'' + r.id + '\\')">编辑</button>'
@@ -674,7 +678,7 @@ function openRuleForm(rid) {
         + '<div style="display:flex;gap:8px">'
         + '<div style="flex:1"><label>匹配方式</label><select name="match_type"><option value="substring">substring</option><option value="regex">regex</option></select></div>'
         + '<div style="flex:1"><label>作用域</label><select name="scope"><option value="request">请求拦截</option><option value="response">响应过滤</option></select></div>'
-        + '<div style="flex:1" id="actionField"><label>动作</label><select name="action"><option value="block">block 整个拦</option><option value="strip">strip 只删匹配</option></select></div>'
+        + '<div style="flex:1" id="actionField"><label>动作</label><select name="action"><option value="block">block 整个拦</option><option value="strip">strip 只删匹配</option><option value="intercept">intercept 特殊拦截</option></select></div>'
         + '</div>'
         + '<label>pattern</label><input name="pattern" required placeholder="&lt;system-reminder&gt;.*?&lt;/system-reminder&gt;">'
         + '<label style="display:flex;align-items:center;gap:6px"><input type="checkbox" name="enabled" checked style="width:auto">启用</label>'
@@ -742,245 +746,8 @@ async function runRuleTest() {
 }
 
 refreshRules();"""
-
     sidebar = _sidebar("/admin/rules")
     return _page_shell("规则", sidebar, content, js)
-
-
-def render_tools():
-    """工具配置页"""
-    content = """<div class="card">
-  <div class="toolbar">
-    <h2>🎮 工具配置 <span id="toolConfigStatus" style="font-size:10px;color:#999;font-weight:400"></span></h2>
-    <div class="actions">
-      <button class="btn-ghost btn-sm" onclick="refreshToolConfig()">🔃 刷新</button>
-      <button class="btn-ghost btn-sm" onclick="resetToolDefaults()">↩ 恢复默认</button>
-      <button class="btn-primary btn-sm" onclick="initTools()">📤 发送初始化</button>
-    </div>
-  </div>
-  <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
-    <label style="font-size:11px;font-weight:600">终端类型：</label>
-    <select id="terminalSelect" onchange="changeTerminal()" style="padding:4px 8px;border:1px solid #d9d9d9;border-radius:4px;font-size:11px">
-      <option value="powershell">PowerShell</option>
-      <option value="cmd">CMD</option>
-      <option value="bash">Bash (WSL/Linux)</option>
-    </select>
-    <span id="terminalHint" style="font-size:10px;color:#999"></span>
-  </div>
-  <div id="toolConfigCard"><div class="empty">加载中...</div></div>
-</div>
-
-"""
-
-    js = """\
-var currentTerminal = 'powershell';
-
-async function refreshToolConfig() {
-    try {
-        // 获取终端类型
-        var tr = await fetch('/api/config/terminal');
-        var td = await tr.json();
-        currentTerminal = td.terminal || 'powershell';
-        $('terminalSelect').value = currentTerminal;
-        $('terminalHint').textContent = getTerminalHint(currentTerminal);
-
-        // 获取工具配置
-        var r = await fetch('/api/tool-config');
-        var d = await r.json();
-        var tools = d.tools || {};
-        var sections = d.sections || [];
-        var names = Object.keys(tools);
-        $('toolConfigStatus').textContent = '(' + names.length + ' 个工具, ' + sections.length + ' 个环节)';
-
-        // sections UI
-        var sectionsHtml = sections.map((sec, i) => {
-            var isTools = sec.id === 'tools';
-            var content = sec.content || '';
-            var title = sec.title || sec.id || ('环节 ' + (i+1));
-            return '<div style="padding:8px;background:#fafafa;border-radius:4px;margin-bottom:6px;border-left:2px solid ' + (sec.enabled ? '#1677ff' : '#d9d9d9') + '">'
-                + '<input type="hidden" id="sec_id_' + i + '" value="' + escapeHtml(sec.id||'') + '">'
-                + '<input type="hidden" id="sec_title_' + i + '" value="' + escapeHtml(title) + '">'
-                + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
-                + '<label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">'
-                + '<input type="checkbox" id="sec_chk_' + i + '" ' + (sec.enabled ? 'checked' : '') + ' onchange="toggleSection(' + i + ')">'
-                + '<span style="font-weight:600">' + escapeHtml(title) + '</span>'
-                + '</label>'
-                + '<span style="font-size:10px;color:#999">#' + escapeHtml(sec.id || '-') + '</span>'
-                + '<span style="font-size:10px;color:' + (sec.enabled ? '#52c41a' : '#999') + '">' + (sec.enabled ? '✅ 开启' : '⛔ 关闭') + '</span>'
-                + '</div>'
-                + (isTools
-                    ? '<div style="font-size:10px;color:#888;padding:4px 6px;background:#f0f0f0;border-radius:3px">自动从工具定义生成</div>'
-                    : '<textarea id="sec_txt_' + i + '" rows="6" style="width:100%;min-height:80px;padding:6px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:11px">' + escapeHtml(content) + '</textarea>')
-                + '</div>';
-        }).join('');
-
-        // 工具列表
-        var toolHtml = names.map(name => {
-            var spec = tools[name];
-            var req = (spec.required||[]).join(', ') || '无';
-            var opt = Object.keys(spec.optional||{}).join(', ') || '无';
-            var example = getToolExample(name, currentTerminal);
-            return '<div style="padding:8px;background:#fafafa;border-radius:4px;margin-bottom:6px;border-left:2px solid #1677ff">'
-                + '<div style="font-size:12px;font-weight:600;color:#1677ff">' + escapeHtml(name) + '</div>'
-                + '<div style="font-size:10px;color:#666;margin-top:4px">' + escapeHtml(spec.description||'') + '</div>'
-                + '<div style="font-size:10px;color:#888;margin-top:4px"><b>必填:</b> ' + escapeHtml(req) + ' · <b>可选:</b> ' + escapeHtml(opt) + '</div>'
-                + '<div style="margin-top:6px;padding:6px;background:#f5f5f5;border-radius:3px;font-family:monospace;font-size:10px;white-space:pre-wrap">' + escapeHtml(example) + '</div>'
-                + '</div>';
-        }).join('');
-
-        $('toolConfigCard').innerHTML =
-            '<div style="margin-bottom:6px;font-size:11px;color:#888">' + names.length + ' 个工具 · ' + sections.length + ' 个环节</div>'
-            + '<div style="margin-bottom:8px"><b style="font-size:11px">📝 初始化消息环节（可开关/编辑，按顺序拼接）</b></div>'
-            + sectionsHtml
-            + '<div style="display:flex;gap:6px;margin-bottom:8px">'
-            + '<button class="btn-ghost btn-sm" onclick="saveSections()">💾 保存环节</button>'
-            + '<button class="btn-ghost btn-sm" onclick="previewInit()">👁 预览</button>'
-            + '</div>'
-            + '<div style="margin-bottom:8px;padding:8px;background:#fffbe6;border:1px solid #ffe58f;border-radius:4px;font-size:11px">'
-            + '<b>📂 初始化参数（初始化时填入）</b>'
-            + '<div style="display:flex;gap:8px;margin-top:4px">'
-            + '<input id="initWorkDir" placeholder="工作目录（如 D:/my-project）" style="flex:1">'
-            + '<input id="initProjectCtx" placeholder="项目背景（可选，如 Vue3 + TS）" style="flex:2">'
-            + '</div>'
-            + '</div>'
-            + '<div><b style="font-size:11px">🔧 工具定义</b></div>' + toolHtml
-            + '<div id="initPreview" style="margin-top:6px"></div>'
-            + '<div id="initMsg" style="margin-top:6px"></div>';
-    } catch(e) { $('toolConfigCard').innerHTML = '<div class="empty">加载失败</div>'; }
-}
-
-function getTerminalHint(t) {
-    var hints = {
-        'powershell': '使用 PowerShell 命令（Get-ChildItem 等）',
-        'cmd': '使用 CMD 命令（dir 等）',
-        'bash': '使用 Bash 命令（ls 等）'
-    };
-    return hints[t] || '';
-}
-
-function getToolExample(name, terminal) {
-    var examples = {
-        'Bash': {
-            'powershell': '工具 Bash\\ncommand="Get-ChildItem C:\\\\Users | Select-Object -ExpandProperty Name"\\n工具结束',
-            'cmd': '工具 Bash\\ncommand="dir C:\\\\Users /ad /b"\\n工具结束',
-            'bash': '工具 Bash\\ncommand="ls -la /home"\\n工具结束'
-        },
-        'Read': {
-            'powershell': '工具 Read\\nfile_path="config.json"\\n工具结束',
-            'cmd': '工具 Read\\nfile_path="config.json"\\n工具结束',
-            'bash': '工具 Read\\nfile_path="config.json"\\n工具结束'
-        },
-        'Write': {
-            'powershell': '工具 Write\\nfile_path="hello.txt"\\ncontent="Hello World"\\n工具结束',
-            'cmd': '工具 Write\\nfile_path="hello.txt"\\ncontent="Hello World"\\n工具结束',
-            'bash': '工具 Write\\nfile_path="hello.txt"\\ncontent="Hello World"\\n工具结束'
-        },
-        'Edit': {
-            'powershell': '工具 Edit\\nfile_path="config.txt"\\nold_string="old"\\nnew_string="new"\\n工具结束',
-            'cmd': '工具 Edit\\nfile_path="config.txt"\\nold_string="old"\\nnew_string="new"\\n工具结束',
-            'bash': '工具 Edit\\nfile_path="config.txt"\\nold_string="old"\\nnew_string="new"\\n工具结束'
-        }
-    };
-    return (examples[name] && examples[name][terminal]) || '示例不可用';
-}
-
-async function changeTerminal() {
-    var t = $('terminalSelect').value;
-    try {
-        await fetch('/api/config/terminal', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({terminal:t}) });
-        currentTerminal = t;
-        $('terminalHint').textContent = getTerminalHint(t);
-        showToast('✅ 终端已切换为 ' + t, true);
-        refreshToolConfig();
-    } catch(e) { showToast('❌ 切换失败', false); }
-}
-
-
-
-function toggleSection(i) {
-    var chk = $('sec_chk_' + i);
-    var secs = getSectionsFromUI();
-    if (secs[i]) secs[i].enabled = chk.checked;
-    saveSectionsToServer(secs);
-}
-
-function getSectionsFromUI() {
-    var secs = [];
-    var i = 0;
-    while ($('sec_chk_' + i)) {
-        var idEl = $('sec_id_' + i);
-        var titleEl = $('sec_title_' + i);
-        var sec = {
-            id: idEl ? idEl.value : '',
-            enabled: $('sec_chk_' + i).checked,
-            title: titleEl ? titleEl.value : '',
-            content: '',
-        };
-        var txt = $('sec_txt_' + i);
-        sec.content = txt ? txt.value : '';
-        i++;
-        secs.push(sec);
-    }
-    return secs;
-}
-
-async function saveSectionsToServer(secs) {
-    try {
-        var r = await fetch('/api/tool-config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({sections:secs}) });
-        var d = await r.json();
-        if (d.ok) { showToast('✅ 已保存', true); refreshToolConfig(); }
-        else showToast('❌ 保存失败', false);
-    } catch(e) { showToast('❌ ' + e.message, false); }
-}
-
-async function saveSections() {
-    var secs = getSectionsFromUI();
-    await saveSectionsToServer(secs);
-}
-
-async function resetToolDefaults() {
-    if (!confirm('恢复默认模板？当前环节与工具定义将被覆盖。')) return;
-    try {
-        var r = await fetch('/api/tool-config/reset-defaults', { method:'POST' });
-        var d = await r.json();
-        if (d.ok) { showToast('✅ 已恢复默认', true); refreshToolConfig(); }
-        else showToast('❌ 失败', false);
-    } catch(e) { showToast('❌ ' + e.message, false); }
-}
-
-async function previewInit() {
-    var wd = $('initWorkDir').value || '.';
-    var pc = $('initProjectCtx').value || '';
-    try {
-        var r = await fetch('/api/tool-config/init', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({working_directory: wd, project_context: pc, preview: true}) });
-        var d = await r.json();
-        if (d.prompt) {
-            $('initPreview').innerHTML = '<div style="margin-top:8px;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:4px">'
-                + '<b style="font-size:11px;color:#389e0d">👁 预览（共 ' + d.prompt.length + ' 字符）</b>'
-                + '<pre style="margin-top:4px;padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;font-size:10px;white-space:pre-wrap;max-height:400px;overflow-y:auto">' + escapeHtml(d.prompt) + '</pre>'
-                + '</div>';
-        } else {
-            $('initPreview').innerHTML = '<div class="empty">预览生成失败</div>';
-        }
-    } catch(e) { $('initPreview').innerHTML = '<div class="empty">' + escapeHtml(e.message) + '</div>'; }
-}
-
-async function initTools() {
-    var wd = $('initWorkDir').value || '.';
-    var pc = $('initProjectCtx').value || '';
-    if (!confirm('发送初始化消息到 DeepSeek？\\n工作目录: ' + (wd || '.') + '\\n项目背景: ' + (pc || '(无)') + '\\n\\n先预览确认？')) return;
-    try {
-        var r = await fetch('/api/tool-config/init', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({working_directory: wd, project_context: pc}) });
-        var d = await r.json();
-        if (d.ok) showToast('✅ 已发送（' + (d.message_id ? 'mid='+d.message_id : '') + '）', true);
-        else showToast('❌ ' + (d.error||'失败'), false);
-    } catch(e) { showToast('❌ ' + e.message, false); }
-}
-
-refreshToolConfig();"""
-
-    sidebar = _sidebar("/admin/tools")
-    return _page_shell("工具", sidebar, content, js)
 
 
 def render_parser_flow():
@@ -1334,3 +1101,306 @@ setInterval(refreshPending, 2000);  // 自动刷新待审批列表"""
 
     sidebar = _sidebar("/admin/debug")
     return _page_shell("审批拦截", sidebar, content, js)
+
+
+def render_prompts():
+    """提示词管理页面 — 合并 sections + tools + compact"""
+
+    content = """<div class="content"><h2>📝 提示词管理</h2>
+
+<!-- 初始化参数 -->
+<div class="card" style="border-left:3px solid #52c41a">
+  <div style="display:flex;align-items:center;gap:8px;cursor:pointer" onclick="toggleDrawer('init')">
+    <span id="init-arrow" style="font-size:12px;transition:transform .2s">▶</span>
+    <div style="flex:1">
+      <div style="font-size:14px;font-weight:600">🚀 初始化</div>
+      <div style="font-size:11px;color:#999;margin-top:2px">发送系统提示词到上游（首次使用时）</div>
+    </div>
+  </div>
+  <div id="init-drawer" style="display:none;margin-top:12px">
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <input id="initWorkDir" placeholder="工作目录（如 D:/my-project）" style="flex:1">
+      <input id="initProjectCtx" placeholder="项目背景（可选）" style="flex:2">
+    </div>
+    <div style="display:flex;gap:6px">
+      <button class="btn-ghost btn-sm" onclick="previewInit()">👁 预览</button>
+      <button class="btn-primary btn-sm" onclick="initTools()">📤 发送初始化</button>
+    </div>
+    <div id="initPreview" style="margin-top:6px"></div>
+  </div>
+</div>
+
+<!-- 系统提示词环节 -->
+<div class="card" style="border-left:3px solid #1677ff">
+  <div style="display:flex;align-items:center;gap:8px;cursor:pointer" onclick="toggleDrawer('sections')">
+    <span id="sections-arrow" style="font-size:12px;transition:transform .2s">▶</span>
+    <div style="flex:1">
+      <div style="font-size:14px;font-weight:600">📋 系统提示词环节</div>
+      <div style="font-size:11px;color:#999;margin-top:2px">按顺序拼接成完整的系统提示词</div>
+    </div>
+    <span id="sections-status" class="tag" style="background:#f5f5f5;color:#999">加载中</span>
+  </div>
+  <div id="sections-drawer" style="display:none;margin-top:12px">
+    <div id="sectionsList"></div>
+    <div style="display:flex;gap:6px;margin-top:8px">
+      <button class="btn-ghost btn-sm" onclick="loadAll()">🔃 刷新</button>
+      <button class="btn-primary btn-sm" onclick="saveSections()">💾 保存环节</button>
+      <button class="btn-ghost btn-sm" onclick="resetDefaults()">↩ 恢复默认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 工具定义 -->
+<div class="card" style="border-left:3px solid #1677ff">
+  <div style="display:flex;align-items:center;gap:8px;cursor:pointer" onclick="toggleDrawer('tools')">
+    <span id="tools-arrow" style="font-size:12px;transition:transform .2s">▶</span>
+    <div style="flex:1">
+      <div style="font-size:14px;font-weight:600">🔧 工具定义</div>
+      <div style="font-size:11px;color:#999;margin-top:2px">定义可用工具，自动生成工具列表注入系统提示词</div>
+    </div>
+    <span id="tools-count" class="tag" style="background:#f5f5f5;color:#999">-</span>
+  </div>
+  <div id="tools-drawer" style="display:none;margin-top:12px">
+    <div id="toolsList"></div>
+  </div>
+</div>
+
+<!-- Compact 摘要 -->
+<div class="card" style="border-left:3px solid #722ed1">
+  <div style="display:flex;align-items:center;gap:8px;cursor:pointer" onclick="toggleDrawer('compact_summary')">
+    <span id="compact_summary-arrow" style="font-size:12px;transition:transform .2s">▶</span>
+    <div style="flex:1">
+      <div style="font-size:14px;font-weight:600">📦 Compact 摘要</div>
+      <div style="font-size:11px;color:#999;margin-top:2px">compact 后自动生成，注入后续请求的系统提示词</div>
+    </div>
+    <span id="compact_summary-status" class="tag" style="background:#f5f5f5;color:#999">加载中</span>
+  </div>
+  <div id="compact_summary-drawer" style="display:none;margin-top:12px">
+    <textarea id="compact_summary-content" rows="8" style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.6"></textarea>
+    <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn-ghost btn-sm" onclick="loadAll()">刷新</button>
+      <button class="btn-primary btn-sm" onclick="savePrompt('compact_summary')">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 压缩指令 -->
+<div class="card" style="border-left:3px solid #fa8c16">
+  <div style="display:flex;align-items:center;gap:8px;cursor:pointer" onclick="toggleDrawer('compact_instruction')">
+    <span id="compact_instruction-arrow" style="font-size:12px;transition:transform .2s">▶</span>
+    <div style="flex:1">
+      <div style="font-size:14px;font-weight:600">✂️ 压缩指令</div>
+      <div style="font-size:11px;color:#999;margin-top:2px">compact 请求时拼入用户消息的压缩提示词</div>
+    </div>
+    <span id="compact_instruction-status" class="tag" style="background:#f5f5f5;color:#999">加载中</span>
+  </div>
+  <div id="compact_instruction-drawer" style="display:none;margin-top:12px">
+    <textarea id="compact_instruction-content" rows="10" style="font-family:ui-monospace,monospace;font-size:12px;line-height:1.6"></textarea>
+    <div style="margin-top:8px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn-ghost btn-sm" onclick="loadAll()">刷新</button>
+      <button class="btn-primary btn-sm" onclick="savePrompt('compact_instruction')">保存</button>
+    </div>
+  </div>
+</div>
+
+</div>
+"""
+
+    js = """\
+var SECTIONS = [];
+var TOOLS = {};
+var PROMPTS = {};
+
+function toggleDrawer(name) {
+    var drawer = document.getElementById(name + '-drawer');
+    var arrow = document.getElementById(name + '-arrow');
+    if (!drawer) return;
+    if (drawer.style.display === 'none') {
+        drawer.style.display = 'block';
+        if (arrow) arrow.style.transform = 'rotate(90deg)';
+    } else {
+        drawer.style.display = 'none';
+        if (arrow) arrow.style.transform = '';
+    }
+}
+
+// ── 加载全部 ────────────────────────────────────────
+
+async function loadAll() {
+    try {
+        var r1 = await fetch('/api/tool-config');
+        var d1 = await r1.json();
+        SECTIONS = d1.sections || [];
+        TOOLS = d1.tools || {};
+
+        var r2 = await fetch('/api/prompts');
+        PROMPTS = await r2.json();
+
+        renderSections();
+        renderTools();
+        renderCompactStatus();
+    } catch(e) { console.error(e); }
+}
+
+// ── Sections ────────────────────────────────────────
+
+function renderSections() {
+    var el = document.getElementById('sectionsList');
+    var st = document.getElementById('sections-status');
+    if (st) st.textContent = SECTIONS.length + ' 个环节';
+
+    var html = SECTIONS.map(function(sec, i) {
+        var isTools = sec.id === 'tools';
+        var title = sec.title || sec.id || ('环节 ' + (i+1));
+        return '<div style="padding:8px;background:#fafafa;border-radius:4px;margin-bottom:6px;border-left:2px solid ' + (sec.enabled ? '#1677ff' : '#d9d9d9') + '">'
+            + '<input type="hidden" id="sec_id_' + i + '" value="' + escapeHtml(sec.id||'') + '">'
+            + '<input type="hidden" id="sec_title_' + i + '" value="' + escapeHtml(title) + '">'
+            + '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">'
+            + '<label style="display:flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">'
+            + '<input type="checkbox" id="sec_chk_' + i + '" ' + (sec.enabled ? 'checked' : '') + ' onchange="toggleSec(' + i + ')">'
+            + '<span style="font-weight:600">' + escapeHtml(title) + '</span>'
+            + '</label>'
+            + '<span style="font-size:10px;color:#999">#' + escapeHtml(sec.id || '-') + '</span>'
+            + '<span style="font-size:10px;color:' + (sec.enabled ? '#52c41a' : '#999') + '">' + (sec.enabled ? '✅' : '⛔') + '</span>'
+            + '</div>'
+            + (isTools
+                ? '<div style="font-size:10px;color:#888;padding:4px 6px;background:#f0f0f0;border-radius:3px">自动从工具定义生成</div>'
+                : '<textarea id="sec_txt_' + i + '" rows="4" style="width:100%;min-height:60px;padding:6px;border:1px solid #ddd;border-radius:4px;font-family:monospace;font-size:11px">' + escapeHtml(sec.content||'') + '</textarea>')
+            + '</div>';
+    }).join('');
+    el.innerHTML = html;
+}
+
+function getSectionsFromUI() {
+    var secs = [];
+    var i = 0;
+    while (document.getElementById('sec_chk_' + i)) {
+        var idEl = document.getElementById('sec_id_' + i);
+        var titleEl = document.getElementById('sec_title_' + i);
+        var txt = document.getElementById('sec_txt_' + i);
+        secs.push({
+            id: idEl ? idEl.value : '',
+            enabled: document.getElementById('sec_chk_' + i).checked,
+            title: titleEl ? titleEl.value : '',
+            content: txt ? txt.value : '',
+        });
+        i++;
+    }
+    return secs;
+}
+
+function toggleSec(i) {
+    saveSections();
+}
+
+async function saveSections() {
+    var secs = getSectionsFromUI();
+    try {
+        var r = await fetch('/api/tool-config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({sections:secs}) });
+        var d = await r.json();
+        if (d.ok) { showToast('✅ 环节已保存', true); loadAll(); }
+        else showToast('❌ 保存失败', false);
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+
+async function resetDefaults() {
+    if (!confirm('恢复默认模板？')) return;
+    try {
+        var r = await fetch('/api/tool-config/reset-defaults', { method:'POST' });
+        var d = await r.json();
+        if (d.ok) { showToast('✅ 已恢复默认', true); loadAll(); }
+        else showToast('❌ 失败', false);
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+
+// ── Tools ───────────────────────────────────────────
+
+function renderTools() {
+    var el = document.getElementById('toolsList');
+    var cnt = document.getElementById('tools-count');
+    var names = Object.keys(TOOLS);
+    if (cnt) cnt.textContent = names.length + ' 个工具';
+
+    var html = names.map(function(name) {
+        var spec = TOOLS[name];
+        var req = (spec.required||[]).join(', ') || '无';
+        var opt = Object.keys(spec.optional||{}).join(', ') || '无';
+        return '<div style="padding:8px;background:#fafafa;border-radius:4px;margin-bottom:6px;border-left:2px solid #1677ff">'
+            + '<div style="font-size:12px;font-weight:600;color:#1677ff">' + escapeHtml(name) + '</div>'
+            + '<div style="font-size:10px;color:#666;margin-top:4px">' + escapeHtml(spec.description||'') + '</div>'
+            + '<div style="font-size:10px;color:#888;margin-top:4px"><b>必填:</b> ' + escapeHtml(req) + ' · <b>可选:</b> ' + escapeHtml(opt) + '</div>'
+            + '</div>';
+    }).join('');
+    el.innerHTML = html || '<div style="font-size:11px;color:#999">无工具定义</div>';
+}
+
+// ── Compact ─────────────────────────────────────────
+
+function renderCompactStatus() {
+    ['compact_summary', 'compact_instruction'].forEach(function(name) {
+        var ta = document.getElementById(name + '-content');
+        var st = document.getElementById(name + '-status');
+        var val = PROMPTS[name] || '';
+        if (ta) ta.value = val;
+        if (st) {
+            if (val.length > 0) {
+                st.textContent = val.length + ' 字符';
+                st.style.background = '#e6fffb';
+                st.style.color = '#006d75';
+            } else {
+                st.textContent = '未设置';
+                st.style.background = '#f5f5f5';
+                st.style.color = '#999';
+            }
+        }
+    });
+}
+
+async function savePrompt(name) {
+    var content = document.getElementById(name + '-content').value;
+    try {
+        var r = await fetch('/api/prompts/' + name, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({content: content})
+        });
+        var d = await r.json();
+        if (d.ok) { showToast('✅ 已保存', true); loadAll(); }
+        else { showToast('❌ 保存失败', false); }
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+
+// ── Init ────────────────────────────────────────────
+
+async function previewInit() {
+    var wd = document.getElementById('initWorkDir').value || '.';
+    var pc = document.getElementById('initProjectCtx').value || '';
+    try {
+        var r = await fetch('/api/tool-config/init', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({working_directory: wd, project_context: pc, preview: true}) });
+        var d = await r.json();
+        if (d.prompt) {
+            document.getElementById('initPreview').innerHTML = '<div style="margin-top:8px;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:4px">'
+                + '<b style="font-size:11px;color:#389e0d">👁 预览（共 ' + d.prompt.length + ' 字符）</b>'
+                + '<pre style="margin-top:4px;padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;font-size:10px;white-space:pre-wrap;max-height:400px;overflow-y:auto">' + escapeHtml(d.prompt) + '</pre>'
+                + '</div>';
+        }
+    } catch(e) { document.getElementById('initPreview').innerHTML = '<div class="empty">' + escapeHtml(e.message) + '</div>'; }
+}
+
+async function initTools() {
+    var wd = document.getElementById('initWorkDir').value || '.';
+    var pc = document.getElementById('initProjectCtx').value || '';
+    if (!confirm('发送初始化消息？\\n工作目录: ' + (wd || '.'))) return;
+    try {
+        var r = await fetch('/api/tool-config/init', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({working_directory: wd, project_context: pc}) });
+        var d = await r.json();
+        if (d.ok) showToast('✅ 已发送', true);
+        else showToast('❌ ' + (d.error||'失败'), false);
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+
+loadAll();
+"""
+
+    sidebar = _sidebar("/admin/prompts")
+    return _page_shell("提示词管理", sidebar, content, js)

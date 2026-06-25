@@ -44,12 +44,17 @@ class BaseBackend:
         account_config: dict | None = None,
         thinking_enabled: bool = True,
         search_enabled: bool = False,
+        system_prompt: str = "",
     ) -> AsyncIterator[Event]:
         """发一条 user 消息，返回事件流。
 
         续接由 ContinuationState 自动管理。
+        system_prompt: 可选的系统提示词，会作为 system message 发送给上游。
         """
-        messages = [{"role": "user", "content": user_content}]
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_content})
         async for ev in self.chat(
             messages,
             model=model,

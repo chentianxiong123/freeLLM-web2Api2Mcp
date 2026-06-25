@@ -8,21 +8,7 @@ router = APIRouter(tags=["config"])
 
 @router.get("/api/config/terminal")
 async def api_get_terminal():
-    cfg = config.load_config()
-    return {"terminal": cfg.get("terminal", "powershell")}
-
-
-@router.post("/api/config/terminal")
-async def api_set_terminal(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
-    terminal = body.get("terminal", "powershell")
-    if terminal not in ("cmd", "powershell", "bash"):
-        return JSONResponse(status_code=400, content={"ok": False, "error": "terminal must be cmd/powershell/bash"})
-    config.update_config(terminal=terminal)
-    return {"ok": True, "terminal": terminal}
+    return {"terminal": "powershell"}
 
 
 @router.get("/api/config/model")

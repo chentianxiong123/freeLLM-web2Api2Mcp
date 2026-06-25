@@ -1,0 +1,28 @@
+{
+  "Bash": {
+    "description": "执行 shell 命令（PowerShell）",
+    "required": ["command"],
+    "optional": {
+      "description": "命令说明",
+      "timeout": "超时毫秒（数字）"
+    }
+  },
+  "Read": {
+    "description": "读文件",
+    "required": ["file_path"],
+    "optional": {
+      "offset": "起始行号（数字）",
+      "limit": "读取行数（数字）"
+    }
+  },
+  "Write": {
+    "description": "写文件（覆盖写入）",
+    "required": ["file_path", "content"],
+    "optional": {}
+  },
+  "Edit": {
+    "description": "精确替换文件内容",
+    "required": ["file_path", "old_string", "new_string"],
+    "optional": {}
+  }
+}
