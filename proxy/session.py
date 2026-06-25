@@ -345,12 +345,16 @@ def track_message(
     output_tok = _estimate_tokens(output_text)
     total_output = thinking_tok + output_tok
 
+    # cached_tokens = 之前累计的输入+输出（历史部分）
+    # 必须在累加 new_input_tokens 和 output_tokens 之前计算
+    prev_input = s.get("new_input_tokens", 0)
+    prev_output = s.get("output_tokens", 0)
+    s["cached_tokens"] = s.get("cached_tokens", 0) + prev_input + prev_output
+
     # 累加
     s["message_count"] = s.get("message_count", 0) + 1
-    s["new_input_tokens"] = s.get("new_input_tokens", 0) + new_input
-    s["output_tokens"] = s.get("output_tokens", 0) + total_output
-    # cached_tokens = 之前累计的输入+输出（历史部分）
-    s["cached_tokens"] = s.get("cached_tokens", 0) + s.get("new_input_tokens", 0) - new_input + s.get("output_tokens", 0) - total_output
+    s["new_input_tokens"] = prev_input + new_input
+    s["output_tokens"] = prev_output + total_output
     s["last_used_at"] = time.time()
     db["sessions"][sid] = s
     _save(db)
