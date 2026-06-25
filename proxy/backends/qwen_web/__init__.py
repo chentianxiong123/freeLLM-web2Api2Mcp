@@ -101,7 +101,7 @@ class QwenWebBackend(BaseBackend):
         if chat_id:
             _accounts.update_account(acc["id"], {"session_id": chat_id, "model": actual_model})
             import session as _sess
-            _sess.register_session(chat_id, label=label, model=actual_model)
+            _sess.register_session(chat_id, label=label, model=actual_model, account_id=acc["id"])
         return chat_id
 
     async def activate_session(self, session_id: str) -> bool:

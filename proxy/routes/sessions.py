@@ -44,13 +44,18 @@ async def api_new_session(request: Request):
 
     backend_id = _cfg.load_config().get("backend", "deepseek")
     backend = get_backend()
-    provider = backend.get_provider()
 
-    if hasattr(provider, "create_session") and callable(provider.create_session):
-        new_sid = await provider.create_session(label, model=model)
+    # 优先调用 backend.create_session，其次调用 provider.create_session
+    new_sid = None
+    if hasattr(backend, "create_session") and callable(backend.create_session):
+        new_sid = await backend.create_session(label, model=model)
     else:
-        from backends.deepseek_web import deepseek_api as ds_api
-        new_sid = ds_api.create_new_session(cfg)
+        provider = backend.get_provider()
+        if hasattr(provider, "create_session") and callable(provider.create_session):
+            new_sid = await provider.create_session(label, model=model)
+        else:
+            from backends.deepseek_web import deepseek_api as ds_api
+            new_sid = ds_api.create_new_session(cfg)
 
     if not new_sid:
         return JSONResponse(status_code=500, content={"ok": False, "error": "创建 session 失败"})
