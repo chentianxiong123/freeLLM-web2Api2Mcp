@@ -1,5 +1,0 @@
-@echo off
-cd /d "%~dp0"
-start "" /B "D:\files\References\others\deepseek-web-agent\.venv\Scripts\python.exe" -X utf8 main.py
-timeout /t 3 >nul
-echo Server started on port 48391

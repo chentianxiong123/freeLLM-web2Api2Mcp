@@ -176,6 +176,8 @@ async def collect_response(
         message["reasoning_content"] = thinking_text
 
     # usage - 全部自己估算，不依赖上游
+    # prompt_tokens = 总输入（新+缓存），cached_tokens = 缓存命中
+    # cc-switch 公式：input_tokens = prompt_tokens - cached_tokens
     full_content = "".join(content_parts)
     thinking_text_for_usage = "\n".join(thinking_parts) if thinking_parts else ""
     _est = lambda t: max(1, len(t) // 2) if t else 0
@@ -185,9 +187,9 @@ async def collect_response(
     completion_est = _est(full_content)
     reasoning_est = _est(thinking_text_for_usage)
     usage = {
-        "prompt_tokens": prompt_est,
+        "prompt_tokens": context_est,
         "completion_tokens": completion_est + reasoning_est,
-        "total_tokens": prompt_est + cached_est + completion_est + reasoning_est,
+        "total_tokens": context_est + completion_est + reasoning_est,
         "prompt_tokens_details": {
             "cached_tokens": cached_est,
         },
@@ -282,6 +284,8 @@ async def stream_response(
             break
 
     # usage - 全部自己估算，不依赖上游
+    # prompt_tokens = 总输入（新+缓存），cached_tokens = 缓存命中
+    # cc-switch 公式：input_tokens = prompt_tokens - cached_tokens
     full_content = "".join(content_parts)
     thinking_text = "\n".join(thinking_parts) if thinking_parts else ""
     _est = lambda t: max(1, len(t) // 2) if t else 0
@@ -291,9 +295,9 @@ async def stream_response(
     completion_est = _est(full_content)
     reasoning_est = _est(thinking_text)
     usage = {
-        "prompt_tokens": prompt_est,
+        "prompt_tokens": context_est,
         "completion_tokens": completion_est + reasoning_est,
-        "total_tokens": prompt_est + cached_est + completion_est + reasoning_est,
+        "total_tokens": context_est + completion_est + reasoning_est,
         "prompt_tokens_details": {
             "cached_tokens": cached_est,
         },
