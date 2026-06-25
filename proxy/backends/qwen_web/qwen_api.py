@@ -179,7 +179,22 @@ class _ThinkingParser:
 _last_response_message_id: dict[str, str] = {}
 
 def get_last_message_id(chat_id: str) -> str | None:
-    return _last_response_message_id.get(chat_id)
+    """获取续接点，优先从内存缓存，其次从 sessions.json。"""
+    mid = _last_response_message_id.get(chat_id)
+    if mid:
+        return mid
+    # 从 sessions.json 恢复
+    try:
+        import session as sess
+        db = sess._load()
+        s = db.get("sessions", {}).get(chat_id, {})
+        mid = s.get("last_message_id")
+        if mid:
+            _last_response_message_id[chat_id] = str(mid)
+            return str(mid)
+    except Exception:
+        pass
+    return None
 
 def reset_last_message_id(chat_id: str | None = None) -> None:
     global _last_response_message_id

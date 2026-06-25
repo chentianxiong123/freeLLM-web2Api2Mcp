@@ -256,7 +256,21 @@ _last_response_message_id: dict[str, int] = {}
 
 def get_last_message_id(session_id: str) -> str | None:
     """查询某个 session 上一次回复的 message_id（供外部测试/调试用）。"""
-    return _last_response_message_id.get(session_id)
+    mid = _last_response_message_id.get(session_id)
+    if mid:
+        return str(mid)
+    # 从 sessions.json 恢复
+    try:
+        import session as sess
+        db = sess._load()
+        s = db.get("sessions", {}).get(session_id, {})
+        mid = s.get("last_message_id")
+        if mid:
+            _last_response_message_id[session_id] = int(mid) if isinstance(mid, str) and mid.isdigit() else mid
+            return str(mid)
+    except Exception:
+        pass
+    return None
 
 
 def reset_last_message_id(session_id: str | None = None) -> None:

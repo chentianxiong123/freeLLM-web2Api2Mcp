@@ -57,23 +57,53 @@ class ContinuationState:
     上游协议实现负责：
     1. 在事件流中提取 message_id 并调用 update()
     2. 发消息时通过 get_continuation_id() 获取续接点
+
+    续接点会从 sessions.json 恢复，服务重启后不会丢失。
     """
 
     def __init__(self):
         self._cache: dict[str, str] = {}  # conversation_id → message_id
+        self._loaded = False
+
+    def _ensure_loaded(self):
+        """确保从 sessions.json 加载续接点。"""
+        if self._loaded:
+            return
+        try:
+            import session as sess
+            db = sess._load()
+            for sid, s in db.get("sessions", {}).items():
+                mid = s.get("last_message_id")
+                if mid:
+                    self._cache[sid] = str(mid)
+        except Exception:
+            pass
+        self._loaded = True
 
     def get_continuation_id(self, conversation_id: str) -> str | None:
         """获取指定会话的续接点。"""
+        self._ensure_loaded()
         return self._cache.get(conversation_id)
 
     def update(self, conversation_id: str, message_id: str):
-        """更新指定会话的续接点。"""
+        """更新指定会话的续接点（同时写入 sessions.json）。"""
         self._cache[conversation_id] = message_id
+        # 持久化到 sessions.json
+        try:
+            import session as sess
+            sess.set_specific_last_message_id(conversation_id, message_id)
+        except Exception:
+            pass
 
     def reset(self, conversation_id: str | None = None):
         """重置续接点。conversation_id=None 时重置所有。"""
         if conversation_id:
             self._cache.pop(conversation_id, None)
+            try:
+                import session as sess
+                sess.set_specific_last_message_id(conversation_id, None)
+            except Exception:
+                pass
         else:
             self._cache.clear()
 
