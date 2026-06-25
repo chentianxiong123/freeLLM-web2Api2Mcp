@@ -158,12 +158,19 @@ async def collect_response(
 
     # usage
     full_content = "".join(content_parts)
-    completion_est = max(1, len(full_content) // 4) if full_content else 0
+    thinking_text_for_usage = "\n".join(thinking_parts) if thinking_parts else ""
+    completion_est = max(1, (len(full_content) + len(thinking_text_for_usage)) // 4) if full_content or thinking_text_for_usage else 0
     prompt_est = max(0, total_tokens - completion_est) if total_tokens else 0
     usage = {
         "prompt_tokens": prompt_est,
         "completion_tokens": completion_est,
         "total_tokens": total_tokens or 0,
+        "prompt_tokens_details": {
+            "cached_tokens": 0,
+        },
+        "completion_tokens_details": {
+            "reasoning_tokens": len(thinking_text_for_usage) // 4 if thinking_text_for_usage else 0,
+        },
     }
 
     result = {

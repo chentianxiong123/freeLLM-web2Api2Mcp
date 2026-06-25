@@ -51,30 +51,31 @@ async def run_chat_completion(
     rid, request_id = _next_rid()
     tools = body.get("tools", []) or []
     msgs = body.get("messages", []) or []
-    model = body.get("model") or backend.active_model()
+    request_model = body.get("model") or ""
+    actual_model = backend.active_model()  # 后端实际使用的模型
 
     print(
-        f"[{rid}] agent={agent.id} backend={backend.id} model={model} "
-        f"msgs={len(msgs)} last={_last_user_preview(msgs)}"
+        f"[{rid}] agent={agent.id} backend={backend.id} model={actual_model} "
+        f"request_model={request_model} msgs={len(msgs)} last={_last_user_preview(msgs)}"
     )
 
     upstream_content, is_react, tool_ids = agent.extract_upstream_turn(body)
 
     if agent.is_housekeeping(body):
         print(f"[{rid}] BLOCKED housekeeping agent={agent.id}")
-        return JSONResponse(content=make_skip_response(model, request_id, "housekeeping"))
+        return JSONResponse(content=make_skip_response(actual_model, request_id, "housekeeping"))
 
     clean_prompt = agent.clean_prompt_for_rules(body)
     blocked, hit_rule = rules.is_blocked(body, clean_prompt)
     if blocked:
         rule_name = hit_rule.get("name", "?") if hit_rule else "?"
         print(f"[{rid}] BLOCKED rule={rule_name}")
-        return JSONResponse(content=make_skip_response(model, request_id, f"rule:{rule_name}"))
+        return JSONResponse(content=make_skip_response(actual_model, request_id, f"rule:{rule_name}"))
 
     turn = TurnRequest(
         body=body,
         headers=headers,
-        model=model,
+        model=actual_model,
         tools=tools,
         request_id=request_id,
         rid=rid,
@@ -128,7 +129,7 @@ async def run_chat_completion(
         async def _capture_events():
             async for ev in backend.chat_turn(
                 final_user_content,
-                model=model,
+                model=actual_model,
                 account_config=account_config,
                 thinking_enabled=True,
                 search_enabled=False,
@@ -142,7 +143,7 @@ async def run_chat_completion(
         from handler import stream_response as _sr
 
         async def _sse_stream():
-            async for line in _sr(_capture_events(), request_id=request_id, model=model):
+            async for line in _sr(_capture_events(), request_id=request_id, model=actual_model):
                 yield line
             output_text = "".join(captured_content)
             thinking_text = "".join(captured_thinking)
@@ -166,7 +167,7 @@ async def run_chat_completion(
     collected = []
     async for ev in backend.chat_turn(
         final_user_content,
-        model=model,
+        model=actual_model,
         account_config=account_config,
         thinking_enabled=True,
         search_enabled=False,
@@ -180,7 +181,7 @@ async def run_chat_completion(
     final_resp = await collect_response(
         _iter(collected),
         request_id=request_id,
-        model=model,
+        model=actual_model,
         tools_schema=tools,
         tool_codec_id=backend.tool_codec_id(),
     )
