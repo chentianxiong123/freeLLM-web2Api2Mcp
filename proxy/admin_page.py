@@ -134,14 +134,21 @@ def _sidebar(active_page):
         cls = " active" if href == active_page else ""
         links += f'  <a class="nav-item{cls}" href="{href}"><span class="icon">{icon}</span> {label}</a>\n'
 
+    # 读取当前 backend
+    try:
+        import config as _cfg
+        _backend_id = _cfg.load_config().get("backend", "deepseek")
+    except Exception:
+        _backend_id = "deepseek"
+    _backend_label = "DeepSeek" if _backend_id == "deepseek" else "Qwen"
     return f"""<div class="sidebar">
   <div class="sidebar-header">
-    <h1>🔌 DeepSeek Proxy</h1>
+    <h1>🔌 {_backend_label} Proxy</h1>
     <span class="subtitle">v0.3.0</span>
   </div>
   <nav class="sidebar-nav">
 {links}  </nav>
-  <div class="sidebar-footer">DeepSeek Web Agent</div>
+  <div class="sidebar-footer">Web Agent Proxy</div>
 </div>"""
 
 
@@ -197,10 +204,9 @@ def _page_shell(title, sidebar_html, content_html, page_js=""):
 
 def render_overview(cfg, usage):
     """概览页"""
-    status_tag_class = 'tag-ok' if cfg.get('token') else 'tag-fail'
-    status_text = '✅ 已登录' if cfg.get('token') else '❌ 未登录'
-    token_display = (cfg.get('token', '')[:24] + '…') if cfg.get('token') else '空'
-    sid_display = (cfg.get('session_id', '')[:24] + '…') if cfg.get('session_id') else '空'
+    current_backend = cfg.get('backend', 'deepseek')
+    current_model = cfg.get('model', 'deepseek-v4-flash')
+    backend_display = "DeepSeek" if current_backend == "deepseek" else "Qwen"
     inp_t = usage.get('input_tokens', 0)
     out_t = usage.get('output_tokens', 0)
     tot_t = usage.get('total_tokens', inp_t + out_t)
@@ -215,16 +221,23 @@ def render_overview(cfg, usage):
         acc_count = len(all_accs)
         logged_in_count = sum(1 for a in all_accs if a.get('token'))
         active_label = active_acc.get('label', active_acc.get('id', '-')) if active_acc else '-'
+        active_backend = active_acc.get('backend', 'deepseek') if active_acc else current_backend
     except Exception:
         acc_count = 0
         logged_in_count = 0
         active_label = '-'
+        active_backend = current_backend
+
+    ds_models = ["deepseek-v4-flash", "deepseek-v4-pro"]
+    qwen_models = ["qwen3.7-max", "qwen3.0-plus", "qwq-32b"]
+    model_options = qwen_models if current_backend == "qwen" else ds_models
+    model_select_options = ""
+    for m in model_options:
+        sel = " selected" if m == current_model else ""
+        model_select_options += f'<option value="{m}"{sel}>{m}</option>'
 
     content = f"""<div class="card">
   <h2>📊 系统概览</h2>
-  <div class="status-row"><span class="lbl">登录状态</span><span class="val"><span class="tag {status_tag_class}">{status_text}</span></span></div>
-  <div class="status-row"><span class="lbl">Token</span><span class="val">{token_display}</span></div>
-  <div class="status-row"><span class="lbl">Session ID</span><span class="val">{sid_display}</span></div>
   <div class="status-row"><span class="lbl">端口</span><span class="val">{port}</span></div>
   <div class="status-row"><span class="lbl">累计输入 Tokens</span><span class="val">{inp_t:,}</span></div>
   <div class="status-row"><span class="lbl">累计输出 Tokens</span><span class="val">{out_t:,}</span></div>
@@ -233,10 +246,22 @@ def render_overview(cfg, usage):
 </div>
 
 <div class="card">
+  <h2>⚙️ 运行配置</h2>
+  <div class="status-row"><span class="lbl">后端</span><span class="val"><span class="tag tag-ok">{backend_display}</span></span></div>
+  <div class="status-row"><span class="lbl">模型</span>
+    <span class="val">
+      <select id="modelSelect" onchange="switchModel()" style="width:auto;padding:4px 8px;font-size:11px">
+        {model_select_options}
+      </select>
+    </span>
+  </div>
+</div>
+
+<div class="card">
   <h2>👤 账号状态</h2>
   <div class="status-row"><span class="lbl">总账号数</span><span class="val">{acc_count}</span></div>
   <div class="status-row"><span class="lbl">已登录</span><span class="val"><span class="tag {'tag-ok' if logged_in_count > 0 else 'tag-fail'}">{logged_in_count} / {acc_count}</span></span></div>
-  <div class="status-row"><span class="lbl">当前活跃</span><span class="val">{active_label}</span></div>
+  <div class="status-row"><span class="lbl">当前活跃</span><span class="val">{active_label} <span class="tag" style="background:#e6f7ff;color:#096dd9">{active_backend}</span></span></div>
   <div style="margin-top:8px"><a class="btn-ghost btn-sm" href="/admin/accounts" style="text-decoration:none">管理账号 →</a></div>
 </div>
 
@@ -251,8 +276,19 @@ def render_overview(cfg, usage):
   </div>
 </div>"""
 
+    js = """\
+async function switchModel() {
+    var v = $('modelSelect').value;
+    try {
+        var r = await fetch('/api/config/model', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model:v}) });
+        var d = await r.json();
+        if (d.ok) showToast('✅ 模型已切换为 ' + d.model, true);
+        else showToast('❌ ' + (d.error||'失败'), false);
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}"""
+
     sidebar = _sidebar("/admin")
-    return _page_shell("概览", sidebar, content)
+    return _page_shell("概览", sidebar, content, js)
 
 
 def render_accounts():
@@ -263,19 +299,27 @@ def render_accounts():
     <div class="actions">
       <button class="btn-ghost btn-sm" onclick="refreshAccounts()">🔃 刷新</button>
       <button class="btn-ghost btn-sm" onclick="importOldAccount()">📥 导入旧配置</button>
-      <button class="btn-primary btn-sm" onclick="openAddAccount()">➕ 添加并登录</button>
+      <button class="btn-primary btn-sm" onclick="openAddAccount()">➕ 添加账号</button>
     </div>
   </div>
   <div id="accountList"><div class="empty">加载中...</div></div>
 </div>"""
 
     js = """\
+var currentBackend = '';
+
 async function refreshAccounts() {
+    // 获取当前后端/账号信息
+    try {
+        var br = await fetch('/api/config/backend');
+        var bd = await br.json();
+        currentBackend = bd.backend || 'deepseek';
+    } catch(e) {}
     try {
         var r = await fetch('/api/accounts');
         var d = await r.json();
         var accs = d.accounts || [];
-        if (accs.length === 0) { $('accountList').innerHTML = '<div class="empty">暂无账号，点击"添加并登录"或"导入旧配置"</div>'; return; }
+        if (accs.length === 0) { $('accountList').innerHTML = '<div class="empty">暂无账号，点击"添加账号"添加</div>'; return; }
         $('accountList').innerHTML = accs.map(a => renderAccountCard(a)).join('');
     } catch(e) {
         $('accountList').innerHTML = '<div class="empty">加载失败: ' + escapeHtml(e.message) + '</div>';
@@ -285,56 +329,101 @@ async function refreshAccounts() {
 function renderAccountCard(a) {
     var active = a.active;
     var hasToken = !!a.token;
+    var isQwen = a.backend === 'qwen';
     var statusBadge = active
         ? (hasToken ? '<span class="tag tag-ok">● 当前</span>' : '<span class="tag tag-warn">● 当前(未登录)</span>')
         : (hasToken ? '<span class="tag tag-ok">● 已登录</span>' : '<span class="tag" style="background:#fff7e6;color:#fa8c16">● 未登录</span>');
-    var accDisplay = escapeHtml((a.account || '').slice(0, 25));
+    var backendLabel = '<span class="tag" style="background:#e6f7ff;color:#096dd9">' + escapeHtml(a.backend || (isQwen ? 'qwen' : 'deepseek')) + '</span> ';
+    var accDisplay = isQwen ? 'JWT Token' : escapeHtml((a.account || '').slice(0, 25));
     var lastUsed = a.last_used ? new Date(a.last_used * 1000).toLocaleString('zh-CN') : '-';
-    var switchBtn = active
-        ? ''
-        : '<button class="btn-primary btn-sm" onclick="activateAccount(\\'' + a.id + '\\')">切换</button>';
-    var loginBtn = hasToken
-        ? '<button class="btn-ghost btn-sm" onclick="loginAccount(\\'' + a.id + '\\')">刷新登录</button>'
-        : '<button class="btn-ghost btn-sm" style="color:#fa8c16;font-weight:600" onclick="loginAccount(\\'' + a.id + '\\')">⚠ 登录</button>';
-    var delBtn = active
-        ? ''
-        : '<button class="btn-danger btn-sm" onclick="deleteAccount(\\'' + a.id + '\\')">删</button>';
+    var switchBtn = active ? '' : '<button class="btn-primary btn-sm" onclick="activateAccount(\\'' + a.id + '\\')">切换</button>';
+    var delBtn = active ? '' : '<button class="btn-danger btn-sm" onclick="deleteAccount(\\'' + a.id + '\\')">删</button>';
     return '<div class="item-card" style="' + (active ? 'border-color:#52c41a;background:#f6ffed' : (hasToken ? '' : 'border-color:#fa8c16;background:#fffbe6')) + '">'
         + '<div class="item-head"><div class="item-info">'
-        + '<div class="item-title">' + statusBadge + ' <b>' + escapeHtml(a.label || a.id) + '</b></div>'
-        + '<div class="item-meta"><b>类型:</b> ' + a.login_type + ' <b>账号:</b> ' + accDisplay
-        + (a.session_id ? ' <b>Session:</b> ' + escapeHtml(a.session_id.slice(0,8)) + '…' : '')
+        + '<div class="item-title">' + backendLabel + statusBadge + ' <b>' + escapeHtml(a.label || a.id) + '</b></div>'
+        + '<div class="item-meta"><b>类型:</b> ' + (isQwen ? 'Qwen' : a.login_type) + ' <b>账号:</b> ' + accDisplay
+        + (a.model ? ' <b>模型:</b> ' + escapeHtml(a.model) : '')
         + ' <b>最后使用:</b> ' + lastUsed
-        + '</div></div><div class="item-actions">' + switchBtn + loginBtn + delBtn + '</div></div></div>';
+        + '</div></div><div class="item-actions">' + switchBtn + delBtn + '</div></div></div>';
 }
 
 function openAddAccount() {
     var html = '<form id="addAccForm" onsubmit="return submitAddAccount(event)">'
-        + '<label>标签</label><input name="label" placeholder="主账号、测试号等" value="账号">'
+        + '<label>Provider 类型</label>'
+        + '<div style="display:flex;gap:8px;margin:4px 0 8px">'
+        + '<label style="flex:1;display:flex;align-items:center;gap:6px;padding:8px;border:2px solid #1677ff;border-radius:6px;cursor:pointer" onclick="selectProvider(\\'deepseek\\')">'
+        + '<input type="radio" name="provider" value="deepseek" checked style="width:auto">'
+        + '<b>DeepSeek</b><span style="font-size:10px;color:#888">邮箱/手机登录</span></label>'
+        + '<label style="flex:1;display:flex;align-items:center;gap:6px;padding:8px;border:2px solid #d9d9d9;border-radius:6px;cursor:pointer" onclick="selectProvider(\\'qwen\\')">'
+        + '<input type="radio" name="provider" value="qwen" style="width:auto">'
+        + '<b>Qwen</b><span style="font-size:10px;color:#888">粘贴 JWT Token</span></label>'
+        + '</div>'
+        + '<div id="dsFields">'
+        + '<label>标签</label><input name="label" placeholder="主账号、测试号等">'
         + '<label>登录方式</label><select name="login_type"><option value="email">邮箱</option><option value="phone">手机号</option></select>'
         + '<label>账号 *</label><input name="account" required placeholder="邮箱或手机号">'
         + '<label>密码 *</label><input name="password" type="password" required>'
         + '<div style="margin-top:8px;padding:8px;background:#f6ffed;border-radius:4px;font-size:12px;color:#52c41a">添加后会自动登录并保存 token</div>'
+        + '</div>'
+        + '<div id="qwenFields" style="display:none">'
+        + '<label>JWT Token *</label>'
+        + '<input name="qwen_token" placeholder="从 chat.qwen.ai DevTools → Application → Local Storage → userInfo.token 复制" style="font-family:monospace;font-size:10px">'
+        + '<label style="margin-top:8px;font-size:11px;color:#888">模型在概览页设置</label>'
+        + '</div>'
         + '<div style="display:flex;gap:6px;margin-top:10px;justify-content:flex-end">'
         + '<button type="button" class="btn-ghost" onclick="closeModal()">取消</button>'
-        + '<button type="submit" class="btn-primary btn-sm">添加并登录</button></div></form>';
+        + '<button type="submit" class="btn-primary btn-sm">添加</button></div></form>';
     openModalRaw('➕ 添加账号', html);
+}
+
+function selectProvider(type) {
+    document.querySelectorAll('input[name="provider"]').forEach(r => r.checked = r.value === type);
+    var labels = document.querySelectorAll('#addAccForm > div:first-child label');
+    labels.forEach(l => {
+        var inp = l.querySelector('input');
+        l.style.borderColor = inp && inp.checked ? '#1677ff' : '#d9d9d9';
+    });
+    if (type === 'qwen') {
+        $('dsFields').style.display = 'none';
+        $('qwenFields').style.display = 'block';
+        $('dsFields').querySelectorAll('[required]').forEach(function(e) { e.removeAttribute('required'); });
+        $('qwenFields').querySelector('[name=qwen_token]').setAttribute('required', '');
+    } else {
+        $('dsFields').style.display = 'block';
+        $('qwenFields').style.display = 'none';
+        $('qwenFields').querySelectorAll('[required]').forEach(function(e) { e.removeAttribute('required'); });
+        $('dsFields').querySelector('[name=account]').setAttribute('required', '');
+        $('dsFields').querySelector('[name=password]').setAttribute('required', '');
+    }
 }
 
 async function submitAddAccount(ev) {
     ev.preventDefault();
     var f = ev.target;
-    var body = { label:f.label.value, login_type:f.login_type.value, account:f.account.value, password:f.password.value };
-    try {
-        var r = await fetch('/api/accounts/add', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
-        var d = await r.json();
-        if (d.ok) {
-            closeModal();
-            if (d.logged_in) { showToast('✅ 添加成功，已自动登录', true); }
-            else { showToast('⚠ 已添加但登录失败: ' + (d.message||''), false); }
-            refreshAccounts();
-        } else { showToast('❌ ' + (d.error||'失败'), false); }
-    } catch(e) { showToast('❌ ' + e.message, false); }
+    var provider = 'deepseek';
+    document.querySelectorAll('input[name="provider"]').forEach(r => { if (r.checked) provider = r.value; });
+    closeModal();
+    if (provider === 'qwen') {
+        var token = f.qwen_token.value.trim();
+        if (!token) { showToast('❌ 请输入 JWT Token', false); return; }
+        try {
+            var r = await fetch('/api/accounts/qwen-token', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({token:token}) });
+            var d = await r.json();
+            if (d.ok) { showToast('✅ Qwen 账号已添加，后端已自动切换', true); refreshAccounts(); }
+            else { showToast('❌ ' + (d.error||'失败'), false); }
+        } catch(e) { showToast('❌ ' + e.message, false); }
+    } else {
+        var body = { label:f.label.value || '账号', login_type:f.login_type.value, account:f.account.value, password:f.password.value };
+        try {
+            var r = await fetch('/api/accounts/add', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+            var d = await r.json();
+            if (d.ok) {
+                if (d.logged_in) { showToast('✅ 添加成功，已自动登录', true); }
+                else { showToast('⚠ 已添加但登录失败: ' + (d.message||''), false); }
+                refreshAccounts();
+            } else { showToast('❌ ' + (d.error||'失败'), false); }
+        } catch(e) { showToast('❌ ' + e.message, false); }
+    }
     return false;
 }
 
@@ -342,16 +431,7 @@ async function activateAccount(id) {
     try {
         var r = await fetch('/api/accounts/activate/' + id, {method:'POST'});
         var d = await r.json();
-        if (d.ok) { showToast('✅ 已切换', true); refreshAccounts(); }
-    } catch(e) { showToast('❌ ' + e.message, false); }
-}
-
-async function loginAccount(id) {
-    showToast('⏳ 登录中...', true);
-    try {
-        var r = await fetch('/api/accounts/login/' + id, {method:'POST'});
-        var d = await r.json();
-        if (d.ok) { showToast('✅ 登录成功', true); refreshAccounts(); }
+        if (d.ok) { showToast('✅ 已切换，后端已自动同步', true); refreshAccounts(); }
         else { showToast('❌ ' + (d.error||'失败'), false); }
     } catch(e) { showToast('❌ ' + e.message, false); }
 }
@@ -388,21 +468,43 @@ def render_sessions():
     <div class="actions">
       <button class="btn-ghost btn-sm" onclick="refreshSessions()">🔃 刷新</button>
       <button class="btn-ghost btn-sm" onclick="openImportSession()">📥 导入</button>
-      <button class="btn-primary btn-sm" onclick="newSession()">➕ 新建</button>
+      <button class="btn-primary btn-sm" onclick="newSession()" id="newSessionBtn">➕ 新建</button>
     </div>
   </div>
-  <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px">
+  <div id="sessionBackendHint" style="margin-bottom:8px;padding:8px;background:#e6f7ff;border-radius:4px;font-size:11px;color:#096dd9;display:none"></div>
+  <div style="margin-bottom:8px;display:flex;align-items:center;gap:8px" id="modelSelectRow">
     <label style="font-size:11px;font-weight:600">新建模型：</label>
     <select id="newModelSelect" style="padding:4px 8px;border:1px solid #d9d9d9;border-radius:4px;font-size:11px">
       <option value="deepseek-v4-flash">🚀 Flash (快速)</option>
       <option value="deepseek-v4-pro">🧠 Pro (专家)</option>
+      <option value="qwen3.7-max">🤖 Qwen Max</option>
+      <option value="qwen3.0-plus">🤖 Qwen Plus</option>
+      <option value="qwq-32b">🤖 QwQ 32B</option>
     </select>
   </div>
   <div id="sessionList"><div class="empty">加载中...</div></div>
 </div>"""
 
     js = """\
+var _backend = 'deepseek';
+
 async function refreshSessions() {
+    try {
+        var br = await fetch('/api/config/backend');
+        var bd = await br.json();
+        _backend = bd.backend || 'deepseek';
+    } catch(e) {}
+
+    $('sessionBackendHint').style.display = _backend === 'qwen' ? 'block' : 'none';
+    $('sessionBackendHint').innerHTML = _backend === 'qwen'
+        ? '💡 Qwen 会话（chat_id）由系统自动管理，删除会话时会同步清理 Qwen 服务端'
+        : '';
+
+    var modelOpts = _backend === 'qwen'
+        ? '<option value="qwen3.7-max">🤖 Qwen Max</option><option value="qwen3.0-plus">🤖 Qwen Plus</option><option value="qwq-32b">🤖 QwQ 32B</option>'
+        : '<option value="deepseek-v4-flash">🚀 Flash (快速)</option><option value="deepseek-v4-pro">🧠 Pro (专家)</option>';
+    $('newModelSelect').innerHTML = modelOpts;
+
     try {
         var r = await fetch('/api/sessions');
         var d = await r.json();
@@ -425,7 +527,7 @@ function renderSessionCard(s) {
     var out = s.output_tokens || 0;
     var total = s.total_tokens || (inp + out);
     var model = s.model || 'deepseek-v4-flash';
-    var modelTag = model.includes('pro') ? '<span class="tag tag-warn">Pro</span>' : '<span class="tag tag-ok">Flash</span>';
+    var modelTag = model.startsWith('qwen') ? '<span class="tag" style="background:#e6f7ff;color:#096dd9">' + escapeHtml(model) + '</span>' : (model.includes('pro') ? '<span class="tag tag-warn">' + escapeHtml(model) + '</span>' : '<span class="tag tag-ok">' + escapeHtml(model) + '</span>');
     var switchBtn = active ? '' : '<button class="btn-primary btn-sm" onclick="activateSession(\\'' + escapeHtml(sid) + '\\')">切换</button>';
     var delBtn = active ? '' : '<button class="btn-danger btn-sm" onclick="deleteSession(\\'' + escapeHtml(sid) + '\\')">删</button>';
     return '<div class="item-card" style="' + (active ? 'border-color:#52c41a;background:#f6ffed' : '') + '">'
@@ -442,7 +544,7 @@ async function newSession() {
     try {
         var r = await fetch('/api/sessions/new', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({label:label, model:model}) });
         var d = await r.json();
-        if (d.ok) { showToast('✅ 已创建 (' + model.replace('deepseek-v4-', '') + ')', true); refreshSessions(); }
+        if (d.ok) { showToast('✅ 已创建 (' + model + ')', true); refreshSessions(); }
         else { showToast('❌ ' + (d.error||'失败'), false); }
     } catch(e) { showToast('❌ ' + e.message, false); }
 }
@@ -879,8 +981,42 @@ refreshToolConfig();"""
 
 def render_parser_flow():
     """解析器流程说明页"""
-    content = r"""<div class="card">
-  <h2>🔍 解析器流程</h2>
+    import config as _cfg
+    _backend_id = _cfg.load_config().get("backend", "deepseek")
+
+    if _backend_id == "qwen":
+        content = r"""<div class="card">
+  <h2>🔍 解析器流程 — Qwen 模式</h2>
+  <div style="font-size:11px;color:#666;margin-bottom:8px">Qwen 使用 OpenAI 标准 JSON 格式输出工具调用，SSE 中直接发送结构化 tool_calls</div>
+  <div style="padding:10px;background:#f5f5f5;border-radius:6px;font-size:11px;line-height:1.8">
+    <div><b>1. Qwen SSE delta</b>（标准 tool_calls 字段）</div>
+    <pre style="margin:4px 0;padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;font-size:11px;white-space:pre-wrap">data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Bash","arguments":""},"id":"call_xxx"}],"phase":"answer"}}]}</pre>
+
+    <div style="margin-top:8px"><b>2. 累积解析</b>（增量 arguments）</div>
+    <div style="padding:8px;background:#fff;border:1px solid #e8e8e8;border-radius:4px;margin:4px 0">
+      <div style="font-family:monospace;font-size:10px;color:#666">逐条 delta 合并同一 index 的 name/arguments</div>
+      <div style="font-family:monospace;font-size:10px;color:#666;margin-top:4px">finish_reason="tool_calls" 时输出完整工具调用</div>
+    </div>
+
+    <div style="margin-top:8px"><b>3. 输出</b>（Provider → Event("tool_call", {name, arguments})）</div>
+    <pre style="margin:4px 0;padding:8px;background:#f6ffed;border:1px solid #b7eb8f;border-radius:4px;font-size:11px">Event("tool_call", {
+  "name": "Bash",
+  "arguments": "{\"command\": \"Get-ChildItem C:/Users\"}"
+})</pre>
+
+    <div style="margin-top:12px;padding:10px;background:#fffbe6;border:1px solid #ffe58f;border-radius:4px">
+      <b style="font-size:11px">💡 Qwen 工具调用说明</b>
+      <div style="margin-top:6px;font-size:11px;color:#666">
+        Qwen AI International 使用 OpenAI 兼容的 function calling 格式。<br>
+        tool_choice 和 tools 参数通过下游 Chat Completions API 透传。
+      </div>
+    </div>
+  </div>
+</div>"""
+        js = ""
+    else:
+        content = r"""<div class="card">
+  <h2>🔍 解析器流程 — DeepSeek 模式</h2>
   <div style="font-size:11px;color:#666;margin-bottom:8px">DeepSeek 返回自然语言格式，解析器用正则切出工具块，转成结构化 tool_calls</div>
   <div style="padding:10px;background:#f5f5f5;border-radius:6px;font-size:11px;line-height:1.8">
     <div><b>1. DeepSeek 原始回复</b>（自然语言暗语）</div>
@@ -939,8 +1075,7 @@ command="ls -la"
     </div>
   </div>
 </div>"""
-
-    js = """\
+        js = """\
 async function testParse() {
     var input = $('parseInput').value;
     if (!input) return;

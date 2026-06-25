@@ -160,11 +160,22 @@ async def chat_completions(request: Request):
 
 @app.get("/v1/models")
 async def list_models():
-    """返回可用模型列表。"""
-    return {"object": "list", "data": [
-        {"id": "deepseek-v4-flash", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
-        {"id": "deepseek-v4-pro", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
-    ]}
+    """返回可用模型列表（按当前 backend 过滤）。"""
+    from config import load_config
+    cfg = load_config()
+    backend = cfg.get("backend", "deepseek")
+    if backend == "qwen":
+        models = [
+            {"id": "qwen3.7-max", "object": "model", "created": 1700000000, "owned_by": "qwen"},
+            {"id": "qwen3.0-plus", "object": "model", "created": 1700000000, "owned_by": "qwen"},
+            {"id": "qwq-32b", "object": "model", "created": 1700000000, "owned_by": "qwen"},
+        ]
+    else:
+        models = [
+            {"id": "deepseek-v4-flash", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+            {"id": "deepseek-v4-pro", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
+        ]
+    return {"object": "list", "data": models}
 
 
 @app.get("/health")

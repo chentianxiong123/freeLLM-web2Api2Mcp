@@ -28,32 +28,25 @@ Rule structure:
   - strip: 只删除匹配的内容，其他保留
 """
 
-import json
 import re
 import time
-import threading
 from pathlib import Path
 
-_FILE = Path(__file__).parent / "rules.json"
-_LOCK = threading.Lock()
+from utils.json_store import JsonStore
+from utils.common import next_id
+
+_store = JsonStore(
+    path=Path(__file__).parent / "rules.json",
+    default_factory=lambda: {"version": 1, "rules": []},
+)
 
 
 def _load() -> dict:
-    with _LOCK:
-        if not _FILE.exists():
-            return {"version": 1, "rules": []}
-        try:
-            return json.loads(_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {"version": 1, "rules": []}
+    return _store.load()
 
 
 def _save(data: dict) -> None:
-    with _LOCK:
-        _FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    _store.save(data)
 
 
 # -- CRUD --
@@ -75,16 +68,7 @@ def add_rule(rule: dict) -> dict:
     data = _load()
     rules = data.setdefault("rules", [])
 
-    existing_nums = []
-    for r in rules:
-        rid = r.get("id", "")
-        if rid.startswith("r"):
-            try:
-                existing_nums.append(int(rid[1:]))
-            except ValueError:
-                pass
-    next_num = (max(existing_nums) + 1) if existing_nums else 1
-    new_id = f"r{next_num:03d}"
+    new_id = next_id(rules, "r")
 
     match_type = rule.get("match_type", "substring")
     if match_type not in ("substring", "regex"):

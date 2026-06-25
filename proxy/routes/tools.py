@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 
 import accounts
 import config
-from backends.deepseek_web import deepseek_api as ds_api
+from backends.registry import get_backend
 import session as sess
 import tool_config
 
@@ -42,10 +42,26 @@ async def api_tool_config_parse(request: Request):
     text = body.get("text", "")
     if not text:
         return JSONResponse({"error": "text required"})
+    # 按当前 backend 选择解析器
+    backend_id = config.load_config().get("backend", "deepseek")
     try:
-        from tool_format import parse_tool_blocks
-        remaining, tool_calls = parse_tool_blocks(text, None)
-        return JSONResponse({"tool_calls": tool_calls, "remaining": remaining})
+        if backend_id == "qwen":
+            # Qwen：尝试解析 JSON tool_calls
+            import json as _json
+            import re as _re
+            tool_calls = []
+            for match in _re.finditer(r'\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*\{[^}]*\}\s*\}', text):
+                try:
+                    tc = _json.loads(match.group())
+                    tool_calls.append(tc)
+                except _json.JSONDecodeError:
+                    pass
+            remaining = text
+            return JSONResponse({"tool_calls": tool_calls, "remaining": remaining})
+        else:
+            from tool_format import parse_tool_blocks
+            remaining, tool_calls = parse_tool_blocks(text, None)
+            return JSONResponse({"tool_calls": tool_calls, "remaining": remaining})
     except Exception as e:
         return JSONResponse({"error": str(e)})
 
@@ -55,10 +71,6 @@ async def api_init_tools(request: Request):
     cfg = accounts.get_account_config()
     if not cfg.get("token"):
         return JSONResponse(status_code=401, content={"ok": False, "error": "未登录"})
-    active_sid = sess.get_current_session_id()
-    if not active_sid:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "没有 active session"})
-    cfg["session_id"] = active_sid
 
     body = {}
     try:
@@ -71,32 +83,39 @@ async def api_init_tools(request: Request):
     preview_only = body.get("preview", False)
 
     prompt = tool_config.build_init_prompt(working_directory=working_directory)
-
     if project_context:
         prompt += f"\n\n项目背景：{project_context}"
 
-    print(f"[ToolInit] 发送初始化消息（{len(prompt)} 字符, wd={working_directory or '(默认)'}）")
+    print(f"[ToolInit] 初始化消息（{len(prompt)} 字符, wd={working_directory or '(默认)'}）")
 
     if preview_only:
         return {"ok": True, "prompt": prompt, "length": len(prompt)}
 
-    ds_messages = [{"role": "user", "content": prompt}]
-    active_model = sess.get_active_model()
-    active_model_type = "expert" if "pro" in active_model else "default"
-    ds_stream = ds_api.chat_completion(
-        cfg=cfg, messages=ds_messages, model=active_model, model_type=active_model_type,
-        thinking_enabled=True, search_enabled=False, stream=True,
-    )
+    # 通过当前 backend 发送
+    backend = get_backend()
+    provider = backend.get_provider()
+    messages = [{"role": "user", "content": prompt}]
+    active_model = backend.active_model()
+
+    collected = []
+    async for ev in provider.chat(
+        messages, model=active_model,
+        account_config=cfg,
+        thinking_enabled=True, search_enabled=False,
+    ):
+        collected.append(ev)
 
     full_content = ""
     got_message_id = None
-    for etype, val in ds_stream:
-        if etype == "content":
-            full_content += val if isinstance(val, str) else ""
-        elif etype == "message_id":
-            got_message_id = val
+    for ev in collected:
+        if ev.type == "content" and isinstance(ev.val, str):
+            full_content += ev.val
+        elif ev.type == "message_id":
+            got_message_id = ev.val
 
     preview = (full_content[:100].replace('\n', ' ') + '…') if len(full_content) > 100 else full_content.replace('\n', ' ')
+
+    # DeepSeek 特有：跟踪 message_id
     if got_message_id:
         sess.set_last_message_id(got_message_id)
         sess.increment_message_count()

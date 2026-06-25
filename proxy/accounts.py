@@ -129,7 +129,7 @@ def update_account(acc_id: str, patch: dict) -> dict | None:
     accounts = _load()
     for acc in accounts:
         if acc.get("id") == acc_id:
-            for k in ("label", "login_type", "account", "password", "token", "session_id", "headers", "active"):
+            for k in ("label", "login_type", "account", "password", "token", "session_id", "headers", "active", "backend", "model"):
                 if k in patch:
                     acc[k] = patch[k]
             acc["updated_at"] = int(time.time())
@@ -166,6 +166,65 @@ def activate_account(acc_id: str) -> bool:
     if found:
         _save(accounts)
     return found
+
+
+def set_qwen_token(token: str, model: str = "qwen3.7-max") -> dict | None:
+    """设置 Qwen token，创建或更新 Qwen 账号，自动激活并切换 backend。"""
+    accounts = _load()
+    now = int(time.time())
+    # 找已有的 Qwen 账号
+    for acc in accounts:
+        if acc.get("backend") == "qwen":
+            acc["token"] = token
+            acc["model"] = model
+            acc["active"] = True
+            for other in accounts:
+                if other is not acc:
+                    other["active"] = False
+            acc["updated_at"] = now
+            _save(accounts)
+            _switch_backend("qwen")
+            return {k: v for k, v in acc.items() if k != "password" and k != "headers"}
+    # 没有则创建新账号
+    existing_nums = []
+    for acc in accounts:
+        aid = acc.get("id", "")
+        if aid.startswith("acc_"):
+            try:
+                existing_nums.append(int(aid[4:]))
+            except ValueError:
+                pass
+    next_num = (max(existing_nums) + 1) if existing_nums else 1
+    new_id = f"acc_{next_num:03d}"
+    new_acc = {
+        "id": new_id,
+        "label": "Qwen",
+        "backend": "qwen",
+        "account": "",
+        "password": "",
+        "token": token,
+        "model": model,
+        "session_id": "",
+        "headers": {},
+        "active": True,
+        "created_at": now,
+        "last_used": now,
+    }
+    for acc in accounts:
+        acc["active"] = False
+    accounts.append(new_acc)
+    _save(accounts)
+    _switch_backend("qwen")
+    return {k: v for k, v in new_acc.items() if k != "password" and k != "headers"}
+
+
+def _switch_backend(backend: str) -> None:
+    """切换 config.json 中的 backend 配置。"""
+    try:
+        import config as _cfg
+        _cfg.update_config(backend=backend)
+    except Exception:
+        pass
 
 
 def save_account_token(acc_id: str, token: str, session_id: str, headers: dict) -> bool:

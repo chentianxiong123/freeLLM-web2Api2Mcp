@@ -21,6 +21,7 @@ DEFAULT_CONFIG = {
     "account_label": "default",
     "terminal": "powershell",  # cmd / powershell / bash
     "model": "deepseek-v4-flash",  # deepseek-v4-flash / deepseek-v4-pro
+    "backend": "deepseek",  # deepseek / qwen
 }
 
 

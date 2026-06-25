@@ -7,6 +7,34 @@ from typing import Any
 
 
 @dataclass
+class TokenUsage:
+    """统一 token 用量结构。
+
+    所有上游协议返回的 usage 都归一化成这个结构。
+    handler 用它构建 OpenAI 响应，session 用它存储统计。
+    """
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    reasoning_tokens: int = 0
+    total_tokens: int = 0
+
+    def to_openai_usage(self) -> dict:
+        """转换为 OpenAI 响应的 usage 字段。"""
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+            "prompt_tokens_details": {
+                "cached_tokens": self.cached_tokens,
+            },
+            "completion_tokens_details": {
+                "reasoning_tokens": self.reasoning_tokens,
+            },
+        }
+
+
+@dataclass
 class TurnRequest:
     """一次 chat completion 在适配器归一化后的输入。"""
 

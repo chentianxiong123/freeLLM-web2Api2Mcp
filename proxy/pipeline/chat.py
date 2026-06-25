@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 import accounts
 import approval
@@ -44,8 +44,7 @@ async def run_chat_completion(
     *,
     body: dict,
     headers: dict[str, str],
-) -> JSONResponse:
-    """返回 JSONResponse（不支持流式）。"""
+) -> JSONResponse | StreamingResponse:
     backend = get_backend()
     agent = get_agent(headers=headers, body=body)
 
@@ -113,12 +112,48 @@ async def run_chat_completion(
     cleaned_content, _strip_hits = rules.clean_request_content(final_user_content)
     final_user_content = cleaned_content or "(empty after strip)"
 
-    t0 = time.time()
     account_config = accounts.get_account_config()
     if not account_config.get("token"):
         return JSONResponse(status_code=401, content={
             "error": {"message": "No active account", "type": "authentication_error"},
         })
+
+    stream = body.get("stream", False)
+    t0 = time.time()
+
+    if stream:
+        captured_content: list[str] = []
+
+        async def _capture_events():
+            async for ev in backend.chat_turn(
+                final_user_content,
+                model=model,
+                account_config=account_config,
+                thinking_enabled=True,
+                search_enabled=False,
+            ):
+                if ev.type == "content" and isinstance(ev.val, str):
+                    captured_content.append(ev.val)
+                yield ev
+
+        from handler import stream_response as _sr
+
+        async def _sse_stream():
+            async for line in _sr(_capture_events(), request_id=request_id, model=model):
+                yield line
+            output_text = "".join(captured_content)
+            sess.track_message(final_user_content, output_text, session_id=account_config.get("session_id"))
+
+        return StreamingResponse(
+            _sse_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     collected = []
     async for ev in backend.chat_turn(
         final_user_content,
@@ -138,6 +173,7 @@ async def run_chat_completion(
         request_id=request_id,
         model=model,
         tools_schema=tools,
+        tool_codec_id=backend.tool_codec_id(),
     )
 
     output_text = final_resp.get("choices", [{}])[0].get("message", {}).get("content", "") or ""

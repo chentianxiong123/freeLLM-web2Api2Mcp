@@ -38,7 +38,26 @@ async def api_set_model(request: Request):
     except Exception:
         return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
     model = body.get("model", "deepseek-v4-flash")
-    if model not in ("deepseek-v4-flash", "deepseek-v4-pro"):
-        return JSONResponse(status_code=400, content={"ok": False, "error": "model must be deepseek-v4-flash or deepseek-v4-pro"})
+    if model not in ("deepseek-v4-flash", "deepseek-v4-pro", "qwen3.7-max", "qwen3.0-plus", "qwq-32b"):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "不支持的 model"})
     config.update_config(model=model)
     return {"ok": True, "model": model}
+
+
+@router.get("/api/config/backend")
+async def api_get_backend():
+    cfg = config.load_config()
+    return {"backend": cfg.get("backend", "deepseek")}
+
+
+@router.post("/api/config/backend")
+async def api_set_backend(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    backend = body.get("backend", "deepseek")
+    if backend not in ("deepseek", "qwen"):
+        return JSONResponse(status_code=400, content={"ok": False, "error": "backend must be deepseek or qwen"})
+    config.update_config(backend=backend)
+    return {"ok": True, "backend": backend}

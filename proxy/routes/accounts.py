@@ -48,8 +48,13 @@ async def api_activate_account(acc_id: str):
     ok = accounts.activate_account(acc_id)
     if ok:
         acc = accounts.get_active_account()
-        if acc and acc.get("session_id"):
-            sess.activate_session(acc["session_id"])
+        if acc:
+            if acc.get("session_id"):
+                sess.activate_session(acc["session_id"])
+            # 自动切换 backend
+            acc_backend = acc.get("backend", "deepseek")
+            import config as _cfg
+            _cfg.update_config(backend=acc_backend)
     return {"ok": ok, "id": acc_id}
 
 
@@ -75,3 +80,34 @@ async def api_login_account(acc_id: str, request: Request):
 async def api_import_account():
     ok = accounts.import_from_config()
     return {"ok": ok, "message": "已导入" if ok else "无需导入（已存在或无数据）"}
+
+
+@router.post("/api/accounts/qwen-token")
+async def api_set_qwen_token(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    token = body.get("token", "")
+    model = body.get("model", "qwen3.7-max")
+    if not token:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "token 不能为空"})
+    result = accounts.set_qwen_token(token, model)
+    return {"ok": True, "account": result, "message": "Qwen token 已设置"}
+
+
+@router.post("/api/accounts/update/{acc_id}")
+async def api_update_account(acc_id: str, request: Request):
+    """更新账号配置（token / model / session_id 等）。"""
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
+    allowed = {"label", "token", "model", "session_id", "active", "backend"}
+    patch = {k: v for k, v in body.items() if k in allowed and v is not None}
+    if not patch:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "没有可更新的字段"})
+    result = accounts.update_account(acc_id, patch)
+    if not result:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "账号不存在"})
+    return {"ok": True, "account": result}

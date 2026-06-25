@@ -51,3 +51,16 @@ main.py.bak
 # ── 运行时日志 ──
 *.log
 proxy/debug_requests/
+
+# ── 测试/调试文件 ──
+proxy/test_*.py
+proxy/debug_*.py
+proxy/test_*.txt
+
+# ── Qwen 状态/凭据 ──
+proxy/qwen_cookies.json
+proxy/qwen_state.json
+
+# ── 其他运行时文件 ──
+_last_raw_sse.txt
+*.json.bak

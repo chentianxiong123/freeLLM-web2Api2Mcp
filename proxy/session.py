@@ -18,12 +18,11 @@
 兼容旧结构：单字段 "session": {...} → 自动迁移到新结构。
 """
 
-import json
 import time
-import threading
 from pathlib import Path
 
 import config
+from utils.json_store import JsonStore
 
 # Token 估算：不分语言，统一 char/2（中英文混合的经验值）
 TOKEN_EST_RATIO = 2.0  # 每个 token 平均 2 字符
@@ -36,49 +35,44 @@ def _estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / TOKEN_EST_RATIO))
 
 
-SESSION_FILE = Path(__file__).parent / "sessions.json"
-_LOCK = threading.Lock()
+def _migrate_session(raw: dict) -> dict:
+    """兼容老结构：{"session": {...}} → {"active_session_id": ..., "sessions": {...}}。"""
+    if "sessions" not in raw:
+        old = raw.get("session", {})
+        sid = old.get("session_id", "")
+        sessions = {}
+        if sid:
+            sessions[sid] = {
+                "label": old.get("model", "default"),
+                "last_message_id": old.get("last_message_id"),
+                "message_count": 0,
+                "created_at": old.get("created", time.time()),
+                "last_used_at": old.get("last_used", time.time()),
+            }
+        return {
+            "active_session_id": sid,
+            "sessions": sessions,
+        }
+    raw.setdefault("active_session_id", "")
+    raw.setdefault("sessions", {})
+    return raw
+
+
+_store = JsonStore(
+    path=Path(__file__).parent / "sessions.json",
+    default_factory=lambda: {"active_session_id": "", "sessions": {}},
+    migrate=_migrate_session,
+)
 
 
 def _load() -> dict:
-    """加载 sessions.json，缺字段自动补全。"""
-    with _LOCK:
-        if not SESSION_FILE.exists():
-            return {"active_session_id": "", "sessions": {}}
-        try:
-            raw = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {"active_session_id": "", "sessions": {}}
-
-        # 兼容老结构：{"session": {...}} → {"active_session_id": ..., "sessions": {...}}
-        if "sessions" not in raw:
-            old = raw.get("session", {})
-            sid = old.get("session_id", "")
-            sessions = {}
-            if sid:
-                sessions[sid] = {
-                    "label": old.get("model", "default"),
-                    "last_message_id": old.get("last_message_id"),
-                    "message_count": 0,
-                    "created_at": old.get("created", time.time()),
-                    "last_used_at": old.get("last_used", time.time()),
-                }
-            raw = {
-                "active_session_id": sid,
-                "sessions": sessions,
-            }
-        else:
-            raw.setdefault("active_session_id", "")
-            raw.setdefault("sessions", {})
-        return raw
+    """加载 sessions.json。"""
+    return _store.load()
 
 
 def _save(data: dict) -> None:
-    with _LOCK:
-        SESSION_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+    """保存 sessions.json。"""
+    _store.save(data)
 
 
 # ── 旧 API 兼容（保留给其他模块用）─────────────────────────
@@ -301,8 +295,8 @@ def increment_message_count(session_id: str | None = None) -> None:
 def track_message(input_text: str, output_text: str = "", session_id: str | None = None) -> None:
     """记录一次消息交换的 token 用量。
 
-    输入按字符估算，持续累加（历史越长输入越多）。
-    输出是单次回答的估算，只保留最新值（不累加）。
+    输入按字符估算，持续累加（历史越长输入越多，显示总用量）。
+    输出按字符估算，持续累加（显示总用量）。
     """
     db = _load()
     sid = session_id or db.get("active_session_id", "")
@@ -311,7 +305,7 @@ def track_message(input_text: str, output_text: str = "", session_id: str | None
     s = db.setdefault("sessions", {}).setdefault(sid, {})
     s["message_count"] = s.get("message_count", 0) + 1
     s["input_tokens"] = s.get("input_tokens", 0) + _estimate_tokens(input_text)
-    s["output_tokens"] = _estimate_tokens(output_text)  # 只保留最新，不累加
+    s["output_tokens"] = s.get("output_tokens", 0) + _estimate_tokens(output_text)
     s["last_used_at"] = time.time()
     db["sessions"][sid] = s
     _save(db)
