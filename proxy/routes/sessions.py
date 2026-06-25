@@ -14,10 +14,15 @@ async def api_list_sessions():
     backend_id = _cfg.load_config().get("backend", "deepseek")
     backend = get_backend()
     provider = backend.get_provider()
+
+    # 获取当前活跃账号的 ID
+    active_acc = accounts.get_active_account()
+    account_id = active_acc.get("id", "") if active_acc else ""
+
     if hasattr(provider, "list_sessions") and callable(provider.list_sessions):
         sessions = await provider.list_sessions()
         return {"sessions": sessions}
-    return {"sessions": sess.list_sessions()}
+    return {"sessions": sess.list_sessions(account_id=account_id)}
 
 
 @router.post("/api/sessions/new")
@@ -33,6 +38,10 @@ async def api_new_session(request: Request):
     if not cfg.get("token"):
         return JSONResponse(status_code=401, content={"ok": False, "error": "未登录"})
 
+    # 获取当前活跃账号的 ID
+    active_acc = accounts.get_active_account()
+    account_id = active_acc.get("id", "") if active_acc else ""
+
     backend_id = _cfg.load_config().get("backend", "deepseek")
     backend = get_backend()
     provider = backend.get_provider()
@@ -46,7 +55,7 @@ async def api_new_session(request: Request):
     if not new_sid:
         return JSONResponse(status_code=500, content={"ok": False, "error": "创建 session 失败"})
 
-    sess.register_session(new_sid, label=label, model=model)
+    sess.register_session(new_sid, label=label, model=model, account_id=account_id)
     sess.activate_session(new_sid)
 
     return {"ok": True, "session_id": new_sid, "label": label, "model": model}
@@ -115,7 +124,12 @@ async def api_import_session(request: Request):
     else:
         last_mid = None
     activate = bool(body.get("activate", False))
-    sess.register_session(sid, label=label)
+
+    # 获取当前活跃账号的 ID
+    active_acc = accounts.get_active_account()
+    account_id = active_acc.get("id", "") if active_acc else ""
+
+    sess.register_session(sid, label=label, account_id=account_id)
     if last_mid is not None or body.get("clear_mid"):
         sess.set_specific_last_message_id(sid, last_mid)
     if activate:

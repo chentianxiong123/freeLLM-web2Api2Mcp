@@ -119,7 +119,10 @@ class QwenProvider:
 
     async def list_sessions(self) -> list[dict]:
         import session as _sess
-        return _sess.list_sessions()
+        import accounts as _accounts
+        active_acc = _accounts.get_active_account()
+        account_id = active_acc.get("id", "") if active_acc else ""
+        return _sess.list_sessions(account_id=account_id)
 
     async def create_session(self, label: str = "", model: str = "") -> str | None:
         import accounts as _accounts

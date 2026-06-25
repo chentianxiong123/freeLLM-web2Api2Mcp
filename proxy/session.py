@@ -48,6 +48,7 @@ def _migrate_session(raw: dict) -> dict:
                 "message_count": 0,
                 "created_at": old.get("created", time.time()),
                 "last_used_at": old.get("last_used", time.time()),
+                "account_id": "",  # 旧数据没有 account_id
             }
         return {
             "active_session_id": sid,
@@ -55,6 +56,9 @@ def _migrate_session(raw: dict) -> dict:
         }
     raw.setdefault("active_session_id", "")
     raw.setdefault("sessions", {})
+    # 为旧 session 添加 account_id 字段
+    for sid, s in raw.get("sessions", {}).items():
+        s.setdefault("account_id", "")
     return raw
 
 
@@ -98,7 +102,7 @@ def get_usage_status() -> dict:
     }
 
 
-def on_new_session(session_id: str, model: str = "") -> None:
+def on_new_session(session_id: str, model: str = "", account_id: str = "") -> None:
     """新建 session（注册到列表 + 设为 active + 同步 config.json）。
 
     注意：这只「注册」一个 session 入口。如果该 session_id 已存在则保留。
@@ -116,7 +120,12 @@ def on_new_session(session_id: str, model: str = "") -> None:
             "output_tokens": 0,
             "created_at": now,
             "last_used_at": now,
+            "account_id": account_id,
         }
+    else:
+        # 更新 account_id（如果提供）
+        if account_id:
+            sessions[session_id]["account_id"] = account_id
     db["active_session_id"] = session_id
     _save(db)
     config.update_config(session_id=session_id, model=sessions[session_id].get("model", "deepseek-v4-flash"))
@@ -172,13 +181,19 @@ def get_current_session_id() -> str:
 # ── 新 API：多 session 管理 ──────────────────────────────
 
 
-def list_sessions() -> list[dict]:
-    """列出所有 session（含 active 标记 + 累计 token 数），按 last_used_at 倒序。"""
+def list_sessions(account_id: str = "") -> list[dict]:
+    """列出指定账号的 session（含 active 标记 + 累计 token 数），按 last_used_at 倒序。
+
+    如果 account_id 为空，则返回所有 session（向后兼容）。
+    """
     db = _load()
     sid_active = db.get("active_session_id", "")
     sessions = db.get("sessions", {})
     out = []
     for sid, s in sessions.items():
+        # 如果指定了 account_id，只返回该账号的 session
+        if account_id and s.get("account_id", "") != account_id:
+            continue
         inp = s.get("input_tokens", 0)
         out_t = s.get("output_tokens", 0)
         out.append({
@@ -193,6 +208,7 @@ def list_sessions() -> list[dict]:
             "total_tokens": inp + out_t,
             "created_at": s.get("created_at"),
             "last_used_at": s.get("last_used_at"),
+            "account_id": s.get("account_id", ""),
         })
     out.sort(key=lambda x: x.get("last_used_at") or 0, reverse=True)
     return out
@@ -214,7 +230,7 @@ def activate_session(session_id: str) -> bool:
     return True
 
 
-def register_session(session_id: str, label: str = "", model: str = "") -> dict:
+def register_session(session_id: str, label: str = "", model: str = "", account_id: str = "") -> dict:
     """手动注册一个新 session（如果不存在则新建，存在则更新 label）。
 
     返回注册后的 session 详情。
@@ -227,6 +243,8 @@ def register_session(session_id: str, label: str = "", model: str = "") -> dict:
             sessions[session_id]["label"] = label
         if model:
             sessions[session_id]["model"] = model
+        if account_id:
+            sessions[session_id]["account_id"] = account_id
     else:
         sessions[session_id] = {
             "label": label or "",
@@ -237,6 +255,7 @@ def register_session(session_id: str, label: str = "", model: str = "") -> dict:
             "output_tokens": 0,
             "created_at": now,
             "last_used_at": now,
+            "account_id": account_id,
         }
     _save(db)
     return sessions[session_id]

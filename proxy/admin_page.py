@@ -528,11 +528,12 @@ function renderSessionCard(s) {
     var total = s.total_tokens || (inp + out);
     var model = s.model || 'deepseek-v4-flash';
     var modelTag = model.startsWith('qwen') ? '<span class="tag" style="background:#e6f7ff;color:#096dd9">' + escapeHtml(model) + '</span>' : (model.includes('pro') ? '<span class="tag tag-warn">' + escapeHtml(model) + '</span>' : '<span class="tag tag-ok">' + escapeHtml(model) + '</span>');
+    var accountTag = s.account_id ? '<span class="tag" style="background:#f0f5ff;color:#1d39c4">' + escapeHtml(s.account_id) + '</span>' : '';
     var switchBtn = active ? '' : '<button class="btn-primary btn-sm" onclick="activateSession(\\'' + escapeHtml(sid) + '\\')">切换</button>';
     var delBtn = active ? '' : '<button class="btn-danger btn-sm" onclick="deleteSession(\\'' + escapeHtml(sid) + '\\')">删</button>';
     return '<div class="item-card" style="' + (active ? 'border-color:#52c41a;background:#f6ffed' : '') + '">'
         + '<div class="item-head"><div class="item-info">'
-        + '<div class="item-title">' + label + escapeHtml(sidShort) + ' ' + badge + ' ' + modelTag + '</div>'
+        + '<div class="item-title">' + label + escapeHtml(sidShort) + ' ' + badge + ' ' + modelTag + ' ' + accountTag + '</div>'
         + '<div class="item-meta"><b>消息:</b> ' + (s.message_count || 0) + ' <b>↘输入:</b> ' + (inp).toLocaleString() + ' <b>↗输出:</b> ' + (out).toLocaleString() + ' <b>总计:</b> ' + (total).toLocaleString() + ' <b>续接:</b> ' + mid + ' <b>使用:</b> ' + lastUsed
         + '</div></div><div class="item-actions">' + switchBtn + delBtn + '</div></div></div>';
 }
