@@ -60,9 +60,17 @@ async def run_chat_completion(
     )
 
     upstream_content, is_react, tool_ids = agent.extract_upstream_turn(body)
+    stream = body.get("stream", False)
 
     if agent.is_housekeeping(body):
         print(f"[{rid}] BLOCKED housekeeping agent={agent.id}")
+        if stream:
+            from handler import stream_skip_response
+            return StreamingResponse(
+                stream_skip_response(actual_model, request_id),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+            )
         return JSONResponse(content=make_skip_response(actual_model, request_id, "housekeeping"))
 
     clean_prompt = agent.clean_prompt_for_rules(body)
@@ -70,6 +78,13 @@ async def run_chat_completion(
     if blocked:
         rule_name = hit_rule.get("name", "?") if hit_rule else "?"
         print(f"[{rid}] BLOCKED rule={rule_name}")
+        if stream:
+            from handler import stream_skip_response
+            return StreamingResponse(
+                stream_skip_response(actual_model, request_id),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+            )
         return JSONResponse(content=make_skip_response(actual_model, request_id, f"rule:{rule_name}"))
 
     turn = TurnRequest(

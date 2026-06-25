@@ -33,6 +33,29 @@ def make_skip_response(model: str, request_id: str, reason: str = "blocked") -> 
     }
 
 
+async def stream_skip_response(model: str, request_id: str):
+    """生成"跳过"的流式响应（housekeeping / rules 命中时返回）。"""
+    created = int(time.time())
+    chunk = {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}],
+    }
+    yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+    chunk2 = {
+        "id": request_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+    yield f"data: {json.dumps(chunk2, ensure_ascii=False)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
 # ── 3. 工具块解析 ──────────────────────────────────────
 
 
