@@ -41,10 +41,7 @@ class QwenWebBackend(BaseBackend):
 
         # 验证会话是否仍有效（Qwen 服务端可能已删除）
         if conversation_id:
-            loop = asyncio.get_running_loop()
-            history = await loop.run_in_executor(
-                None, self._protocol.get_history, token, conversation_id
-            )
+            history = await self._protocol.get_history(token, conversation_id)
             if history is None:
                 print(f"[Qwen] Chat {conversation_id[:12]}... invalid/deleted, will create new")
                 conversation_id = ""
