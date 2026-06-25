@@ -83,12 +83,12 @@ async def collect_response(
     model: str,
     tools_schema: list[dict] | None = None,
     tool_codec_id: str = "deepseek_natural",
+    input_text: str = "",
 ) -> dict:
     """收集所有事件，返回完整的 OpenAI 响应 dict。"""
     thinking_parts: list[str] = []
     content_parts: list[str] = []
     tool_calls: list[dict] = []
-    total_tokens: int | None = None
     error_occurred = False
     error_msg = ""
 
@@ -111,11 +111,6 @@ async def collect_response(
                     except json.JSONDecodeError:
                         pass
                 tool_calls.append({"name": tc_name, "arguments": tc_args})
-        elif ev.type == "token_usage":
-            if isinstance(ev.val, (int, float)) and ev.val:
-                total_tokens = int(ev.val)
-            elif isinstance(ev.val, dict):
-                total_tokens = ev.val.get("total_tokens") or 0
         elif ev.type == "error":
             error_occurred = True
             error_msg = str(ev.val)
@@ -156,20 +151,22 @@ async def collect_response(
     if thinking_text:
         message["reasoning_content"] = thinking_text
 
-    # usage
+    # usage - 全部自己估算，不依赖上游
     full_content = "".join(content_parts)
     thinking_text_for_usage = "\n".join(thinking_parts) if thinking_parts else ""
-    completion_est = max(1, (len(full_content) + len(thinking_text_for_usage)) // 4) if full_content or thinking_text_for_usage else 0
-    prompt_est = max(0, total_tokens - completion_est) if total_tokens else 0
+    _est = lambda t: max(1, len(t) // 2) if t else 0
+    prompt_est = _est(input_text)
+    completion_est = _est(full_content)
+    reasoning_est = _est(thinking_text_for_usage)
     usage = {
         "prompt_tokens": prompt_est,
-        "completion_tokens": completion_est,
-        "total_tokens": total_tokens or 0,
+        "completion_tokens": completion_est + reasoning_est,
+        "total_tokens": prompt_est + completion_est + reasoning_est,
         "prompt_tokens_details": {
             "cached_tokens": 0,
         },
         "completion_tokens_details": {
-            "reasoning_tokens": len(thinking_text_for_usage) // 4 if thinking_text_for_usage else 0,
+            "reasoning_tokens": reasoning_est,
         },
     }
 
@@ -217,6 +214,7 @@ async def stream_response(
     *,
     request_id: str,
     model: str,
+    input_text: str = "",
 ) -> AsyncIterator[str]:
     """将 Provider Event 流转换为 OpenAI SSE 消息。
 
@@ -226,7 +224,7 @@ async def stream_response(
     created = int(time.time())
     role_sent = False
     content_parts: list[str] = []
-    total_tokens: int | None = None
+    thinking_parts: list[str] = []
     tool_calls_acc: list[dict] = []
 
     async for ev in events:
@@ -239,6 +237,7 @@ async def stream_response(
                 yield _make_sse_chunk(request_id, model, created, 0, {"content": ev.val})
         elif ev.type == "thinking":
             if isinstance(ev.val, str) and ev.val:
+                thinking_parts.append(ev.val)
                 yield _make_sse_chunk(request_id, model, created, 0, {"reasoning_content": ev.val})
         elif ev.type == "tool_call":
             if not role_sent:
@@ -248,11 +247,6 @@ async def stream_response(
                 tc = _build_openai_tool_call(ev.val)
                 tool_calls_acc.append(tc)
                 yield _make_sse_chunk(request_id, model, created, 0, {"tool_calls": [tc]})
-        elif ev.type == "token_usage":
-            if isinstance(ev.val, (int, float)):
-                total_tokens = int(ev.val)
-            elif isinstance(ev.val, dict):
-                total_tokens = ev.val.get("total_tokens") or 0
         elif ev.type == "error":
             yield _make_sse_chunk(request_id, model, created, 0, {"content": f"[错误] {ev.val}"}, finish_reason="stop")
             yield "data: [DONE]\n\n"
@@ -260,16 +254,23 @@ async def stream_response(
         elif ev.type == "done":
             break
 
-    # usage
+    # usage - 全部自己估算，不依赖上游
     full_content = "".join(content_parts)
-    completion_est = max(1, len(full_content) // 4) if full_content else 0
-    prompt_est = (total_tokens or 0) - completion_est
-    if prompt_est < 0:
-        prompt_est = 0
+    thinking_text = "\n".join(thinking_parts) if thinking_parts else ""
+    _est = lambda t: max(1, len(t) // 2) if t else 0
+    prompt_est = _est(input_text)
+    completion_est = _est(full_content)
+    reasoning_est = _est(thinking_text)
     usage = {
         "prompt_tokens": prompt_est,
-        "completion_tokens": completion_est,
-        "total_tokens": total_tokens or 0,
+        "completion_tokens": completion_est + reasoning_est,
+        "total_tokens": prompt_est + completion_est + reasoning_est,
+        "prompt_tokens_details": {
+            "cached_tokens": 0,
+        },
+        "completion_tokens_details": {
+            "reasoning_tokens": reasoning_est,
+        },
     }
 
     finish_reason = "tool_calls" if tool_calls_acc else "stop"

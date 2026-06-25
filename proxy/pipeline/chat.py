@@ -143,7 +143,7 @@ async def run_chat_completion(
         from handler import stream_response as _sr
 
         async def _sse_stream():
-            async for line in _sr(_capture_events(), request_id=request_id, model=actual_model):
+            async for line in _sr(_capture_events(), request_id=request_id, model=actual_model, input_text=final_user_content):
                 yield line
             output_text = "".join(captured_content)
             thinking_text = "".join(captured_thinking)
@@ -184,6 +184,7 @@ async def run_chat_completion(
         model=actual_model,
         tools_schema=tools,
         tool_codec_id=backend.tool_codec_id(),
+        input_text=final_user_content,
     )
 
     output_text = final_resp.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
