@@ -182,6 +182,18 @@ DEFAULT_RULES = [
         "created_at": 0,
         "updated_at": 0,
     },
+    {
+        "id": "r004",
+        "name": "OPENCODE CMD TAGS",
+        "match_type": "regex",
+        "scope": "request",
+        "action": "strip",
+        "pattern": r"<local-command-caveat>.*?</local-command-caveat>|<command-name>.*?</command-name>|<command-message>.*?</command-message>|<command-args>.*?</command-args>|<local-command-stdout>.*?</local-command-stdout>",
+        "enabled": True,
+        "note": "剥离 OpenCode 注入的命令标签（/compact 等）",
+        "created_at": 0,
+        "updated_at": 0,
+    },
 ]
 
 

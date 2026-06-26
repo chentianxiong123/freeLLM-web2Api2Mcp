@@ -247,9 +247,9 @@ def chat_completion(
             elif m.get("role") == "user":
                 content = m.get("content", "")
         if sys_content and content:
-            content = f"[System]\n{sys_content}\n\n{content}"
+            content = f"{sys_content}\n\n{content}"
         elif sys_content and not content:
-            content = f"[System]\n{sys_content}"
+            content = sys_content
 
         fid = _rand_id()
         child_id = _rand_id()

@@ -29,6 +29,12 @@ async def _reset_upstream_session(backend, rid: str):
         session_id = cfg.get("session_id")
         if session_id:
             backend._continuation.reset(session_id)
+            # 同时清掉 qwen_api 的内存缓存
+            try:
+                from backends.qwen_web import qwen_api
+                qwen_api.reset_last_message_id(session_id)
+            except Exception:
+                pass
             print(f"[{rid}] compact: continuation reset for session={session_id[:12]}...")
     except Exception as e:
         print(f"[{rid}] compact reset failed: {e}")
@@ -184,6 +190,10 @@ async def run_chat_completion(
     stream = body.get("stream", False)
     t0 = time.time()
 
+    from config import load_config as _load_cfg
+    _app_cfg = _load_cfg()
+    _thinking = _app_cfg.get("thinking_enabled", True)
+
     if stream:
         captured_content: list[str] = []
         captured_thinking: list[str] = []
@@ -193,7 +203,7 @@ async def run_chat_completion(
                 final_user_content,
                 model=actual_model,
                 account_config=account_config,
-                thinking_enabled=True,
+                thinking_enabled=_thinking,
                 search_enabled=False,
                 system_prompt=system_prompt,
             ):
@@ -206,7 +216,15 @@ async def run_chat_completion(
         from handler import stream_response as _sr
 
         async def _sse_stream():
-            async for line in _sr(_capture_events(), request_id=request_id, model=actual_model, input_text=final_user_content, full_context_text=full_context_text):
+            async for line in _sr(
+                _capture_events(),
+                request_id=request_id,
+                model=actual_model,
+                tools_schema=tools,
+                tool_codec_id=backend.tool_codec_id(),
+                input_text=final_user_content,
+                full_context_text=full_context_text,
+            ):
                 yield line
             output_text = "".join(captured_content)
             thinking_text = "".join(captured_thinking)
@@ -216,12 +234,11 @@ async def run_chat_completion(
                 thinking_text=thinking_text,
                 session_id=account_config.get("session_id"),
             )
-            # compact 完成后：保存摘要 + 后台重置上游会话
+            # compact 完成后：保存摘要 + 重置上游会话
             if is_compact:
                 prompt_manager.set_compact_summary(output_text)
                 print(f"[{rid}] compact summary saved ({len(output_text)} chars)")
-                import asyncio
-                asyncio.create_task(_reset_upstream_session(backend, rid))
+                await _reset_upstream_session(backend, rid)
 
         return StreamingResponse(
             _sse_stream(),
@@ -238,7 +255,7 @@ async def run_chat_completion(
         final_user_content,
         model=actual_model,
         account_config=account_config,
-        thinking_enabled=True,
+        thinking_enabled=_thinking,
         search_enabled=False,
         system_prompt=system_prompt,
     ):
@@ -271,12 +288,11 @@ async def run_chat_completion(
         session_id=account_config.get("session_id"),
     )
 
-    # compact 完成后：保存摘要 + 后台重置上游会话
+    # compact 完成后：保存摘要 + 重置上游会话
     if is_compact:
         prompt_manager.set_compact_summary(output_text)
         print(f"[{rid}] compact summary saved ({len(output_text)} chars)")
-        import asyncio
-        asyncio.create_task(_reset_upstream_session(backend, rid))
+        await _reset_upstream_session(backend, rid)
 
     duration_ms = (time.time() - t0) * 1000
 

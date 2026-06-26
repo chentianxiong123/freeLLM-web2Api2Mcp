@@ -59,13 +59,11 @@ async def stream_skip_response(model: str, request_id: str):
 # ── 3. 工具块解析 ──────────────────────────────────────
 
 
-def _detect_tool_blocks(text: str, tool_codec_id: str = "deepseek_natural") -> tuple[str, list[dict]]:
+def _detect_tool_blocks(text: str, tool_codec_id: str = "deepseek_natural", tools_schema: list[dict] | None = None) -> tuple[str, list[dict]]:
     """从文本里切出工具块。返回 (剩余文本, 工具调用列表[{name, arguments}])。"""
-    if tool_codec_id != "deepseek_natural":
-        return text, []
     try:
         from tool_format import parse_tool_blocks
-        return parse_tool_blocks(text, None)
+        return parse_tool_blocks(text, tools_schema)
     except Exception:
         return text, []
 
@@ -97,6 +95,42 @@ def _build_openai_tool_call(tc: dict) -> dict:
         tc["name"],
         args,
     )
+
+
+def _stream_tool_call_chunks(
+    request_id: str,
+    model: str,
+    created: int,
+    tc: dict,
+    index: int,
+) -> list[str]:
+    """把一个 tool_call 拆成 OpenAI 标准的增量 SSE chunks。
+
+    OpenAI 流式格式：
+      chunk1: delta.tool_calls[0] = {index, id, type, function: {name, arguments: ""}}
+      chunk2: delta.tool_calls[0] = {index, function: {arguments: "<完整 JSON>"}}
+    """
+    call_id = tc.get("id", f"call_{uuid.uuid4().hex[:24]}")
+    func = tc.get("function", {})
+    name = func.get("name", "")
+    args_str = func.get("arguments", "{}")
+
+    # chunk1: id + name + 空 arguments
+    chunk1_tc = {
+        "index": index,
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": ""},
+    }
+    # chunk2: 完整 arguments
+    chunk2_tc = {
+        "index": index,
+        "function": {"arguments": args_str},
+    }
+    return [
+        _make_sse_chunk(request_id, model, created, 0, {"tool_calls": [chunk1_tc]}),
+        _make_sse_chunk(request_id, model, created, 0, {"tool_calls": [chunk2_tc]}),
+    ]
 
 
 async def collect_response(
@@ -152,12 +186,14 @@ async def collect_response(
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
-    # 如果 provider 没给结构化 tool_calls（比如文本模式），从 content 解析
-    if not tool_calls:
-        full_content = "".join(content_parts)
-        remaining_text, parsed_calls = _detect_tool_blocks(full_content, tool_codec_id)
-    else:
-        remaining_text = "".join(content_parts)
+    # 始终从 content 文本中解析工具块（Qwen 可能同时有结构化 tool_call 事件和 content 中的工具块文本）
+    full_content = "".join(content_parts)
+    remaining_text, parsed_calls = _detect_tool_blocks(full_content, tool_codec_id, tools_schema)
+    if tool_calls and not parsed_calls:
+        # 有结构化 tool_call 事件但文本中无工具块 → 用结构化结果
+        parsed_calls = tool_calls
+    elif tool_calls and parsed_calls:
+        # 两者都有 → 优先用结构化结果（更可靠），但用清理后的文本
         parsed_calls = tool_calls
 
     # 构建 message
@@ -242,6 +278,8 @@ async def stream_response(
     *,
     request_id: str,
     model: str,
+    tools_schema: list[dict] | None = None,
+    tool_codec_id: str = "deepseek_natural",
     input_text: str = "",
     full_context_text: str = "",
 ) -> AsyncIterator[str]:
@@ -258,13 +296,12 @@ async def stream_response(
 
     async for ev in events:
         if ev.type == "content":
+            if isinstance(ev.val, str) and ev.val:
+                content_parts.append(ev.val)
+        elif ev.type == "thinking":
             if not role_sent:
                 role_sent = True
                 yield _make_sse_chunk(request_id, model, created, 0, {"role": "assistant", "content": ""})
-            if isinstance(ev.val, str) and ev.val:
-                content_parts.append(ev.val)
-                yield _make_sse_chunk(request_id, model, created, 0, {"content": ev.val})
-        elif ev.type == "thinking":
             if isinstance(ev.val, str) and ev.val:
                 thinking_parts.append(ev.val)
                 yield _make_sse_chunk(request_id, model, created, 0, {"reasoning_content": ev.val})
@@ -275,13 +312,45 @@ async def stream_response(
             if isinstance(ev.val, dict):
                 tc = _build_openai_tool_call(ev.val)
                 tool_calls_acc.append(tc)
-                yield _make_sse_chunk(request_id, model, created, 0, {"tool_calls": [tc]})
+                for chunk in _stream_tool_call_chunks(request_id, model, created, tc, len(tool_calls_acc) - 1):
+                    yield chunk
         elif ev.type == "error":
             yield _make_sse_chunk(request_id, model, created, 0, {"content": f"[错误] {ev.val}"}, finish_reason="stop")
             yield "data: [DONE]\n\n"
             return
         elif ev.type == "done":
             break
+
+    # 解析工具块：先缓冲 content，解析后再发送（避免原始工具块文本泄漏给客户端）
+    full_content = "".join(content_parts)
+    # 始终从 content 文本中解析工具块（Qwen 可能同时有结构化 tool_call 事件和 content 中的工具块文本）
+    remaining_text, parsed_calls = _detect_tool_blocks(full_content, tool_codec_id, tools_schema)
+    print(f"[STREAM-DBG] tool_codec_id={tool_codec_id} content_len={len(full_content)} tool_calls_acc={len(tool_calls_acc)} parsed_calls={len(parsed_calls)} remaining_len={len(remaining_text)}")
+    if parsed_calls:
+        print(f"[STREAM-DBG] parsed names={[tc['name'] for tc in parsed_calls]}")
+    if parsed_calls and not tool_calls_acc:
+        # 文本解析出工具调用，且没有结构化 tool_call 事件 → 用文本解析结果
+        if remaining_text:
+            if not role_sent:
+                role_sent = True
+                yield _make_sse_chunk(request_id, model, created, 0, {"role": "assistant", "content": ""})
+            yield _make_sse_chunk(request_id, model, created, 0, {"content": remaining_text})
+        if not role_sent:
+            role_sent = True
+            yield _make_sse_chunk(request_id, model, created, 0, {"role": "assistant", "content": ""})
+        for tc in parsed_calls:
+            openai_tc = _build_openai_tool_call(tc)
+            tool_calls_acc.append(openai_tc)
+            for chunk in _stream_tool_call_chunks(request_id, model, created, openai_tc, len(tool_calls_acc) - 1):
+                yield chunk
+    else:
+        # 无文本工具块，或已有结构化 tool_call → 发送清理后的 content（去掉工具块文本）
+        clean_content = remaining_text if parsed_calls else full_content
+        if clean_content:
+            if not role_sent:
+                role_sent = True
+                yield _make_sse_chunk(request_id, model, created, 0, {"role": "assistant", "content": ""})
+            yield _make_sse_chunk(request_id, model, created, 0, {"content": clean_content})
 
     # usage - 全部自己估算，不依赖上游
     # prompt_tokens = 总输入（新+缓存），cached_tokens = 缓存命中

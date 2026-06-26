@@ -1,90 +1,30 @@
-"""DeepSeek 工具调用响应解析器
+"""工具调用响应解析器
 
-DeepSeek 用 "自然语言暗语" 输出工具调用：
-    工具 名称
-    key="value"
-    key2="value2"
-    工具结束
-
-我们的任务：
-1. 从 DeepSeek 完整回复中切出所有"工具块"
-2. 每个块转成 {name, arguments} 结构
-3. 残留的普通文本作为 content
-4. 多个工具块按出现顺序
-
-依赖：调用方传入工具 schema（用于类型推断）
-"""
-
-"""DeepSeek 工具调用响应解析器
-
-DeepSeek 用 "自然语言暗语" 输出工具调用：
-    工具 名称
-    key="value"
-    key2="value2"
-    工具结束
-
-我们的任务：
-1. 从 DeepSeek 完整回复中切出所有"工具块"
-2. 每个块转成 {name, arguments} 结构
-3. 残留的普通文本作为 content
-4. 多个工具块按出现顺序
-
-依赖：调用方传入工具 schema（用于类型推断）
+从模型输出中提取工具块，转成 {name, arguments} 结构。
+支持格式错乱、截断、工具混在正文里等边界情况。
 """
 
 import os
 import re
 from typing import Any
 
-# 工具块匹配
-# 匹配 "工具 名称" + key=value 行，不要求 "工具结束"（工具结束是 react 完成信号，可选）
-# 前瞻判断边界：下一个 "工具 名称" 或 "工具结束" 或字符串结尾
-TOOL_BLOCK_RE = re.compile(
-    r'^[ \t]*工具[ \t]+([A-Za-z_]\w*)[ \t]*\n'           # 工具名行（允许 tab/空格缩进）
-    r'((?:[ \t]*[A-Za-z_]\w*[ \t]*=[ \t]*(?:"(?:\\.|[^"\\])*"|\S+)[ \t]*(?:\n|$))*)'  # key=value 行（可选尾随 \n，兼容无 \n 结尾的情况）
-    r'(?=\n[ \t]*工具[ \t]+|'                              # 前瞻：下一个工具
-    r'\n[ \t]*工具结束[ \t]*|'                             # 或工具结束
-    r'\Z)',                                                # 或字符串结尾
-    re.MULTILINE,
-)
-
-# 独立匹配 "工具结束" 行（可选，用于检测 react 完成信号）
-TOOL_END_RE = re.compile(
-    r'^[ \t]*工具结束[ \t]*\n?',
-    re.MULTILINE,
-)
-
-# 单个 key="value" 行（兼容：带引号 / 不带引号 / 引号内嵌转义 / 前导空白）
-#   - key="value"           标准
-#   - key="val\"ue"         value 里嵌转义引号
-#   - key=10000             数字无引号
-#   - key=value             简单无空格无引号
-#   -   key="value"         带缩进
+# 单个 key="value" 行
 KEY_VALUE_RE = re.compile(
-    r'^[ \t]*([A-Za-z_]\w*)[ \t]*=[ \t]*(?:"((?:\\.|[^"\\])*)"|(\S+))\s*$',
+    r'^[ \t]*([A-Za-z_]\w*)[ \t]*=[ \t]*(?:"((?:\\.|[^"\\])*)"|(\S+)|"((?:\\.|[^"\\])*?)\s*$)',
     re.MULTILINE,
 )
+
+# 工具名行：行首 "工具 名称"
+_TOOL_LINE_RE = re.compile(r'^工具\s+([A-Za-z_]\w*)\s*$')
 
 
 def _unescape(s: str) -> str:
-    """还原字符串里的转义。"""
-    return s.replace('\\"', '"').replace('\\\\', '\\').replace('\\n', '\n').replace('\\t', '\t')
+    """还原转义。只处理 \" 和 \\，不处理 \\n \\t（路径里反斜杠不是转义）。"""
+    return s.replace('\\"', '"').replace('\\\\', '\\')
 
 
 def _expand_tilde(args: dict) -> dict:
-    """把参数值里的 ~/X 或 ~ 展开成绝对路径。
-
-    DeepSeek 经常写 `~/Desktop` 这种 Unix 风格路径，但 Claude Code（尤其 Windows 上）
-    跑 Bash 时 `~` 不展开 → 命令返回空 → DeepSeek 误判超时 → 无限循环。
-
-    在工具块解析阶段直接展开，DeepSeek 完全无感。
-
-    规则：
-    - ~/X  →  {user_home}/X
-    - ~    →  {user_home}
-    - 已经绝对路径（盘符 C:/ 或 /）的，不动
-    - 非字符串值（数字、布尔），不动
-    """
+    """展开 ~/X 为绝对路径。"""
     if not isinstance(args, dict):
         return args
     home = None
@@ -101,7 +41,7 @@ def _expand_tilde(args: dict) -> dict:
             if v == "~":
                 out[k] = home
             elif v.startswith("~/"):
-                out[k] = home + v[1:]  # 保留开头的 /
+                out[k] = home + v[1:]
             else:
                 out[k] = v
         else:
@@ -110,7 +50,7 @@ def _expand_tilde(args: dict) -> dict:
 
 
 def _infer_type(value: str, schema_type: str | None) -> Any:
-    """根据 JSON schema 类型推断 Python 值。"""
+    """按 schema 类型推断值。"""
     if schema_type == "integer":
         try:
             return int(value)
@@ -128,12 +68,11 @@ def _infer_type(value: str, schema_type: str | None) -> Any:
         if value == "false":
             return False
         return value
-    # string / object / array / 默认：保持字符串（object/array 暂不解析 JSON，让 Claude Code 端去解析）
     return value
 
 
 def _coerce_arguments(raw_args: dict[str, str], tool_schema: dict | None) -> dict:
-    """按 schema 把字符串值转成正确类型。"""
+    """按 schema 转换参数类型。"""
     if not tool_schema:
         return {k: _unescape(v) for k, v in raw_args.items()}
     props = (tool_schema.get("parameters") or {}).get("properties") or {}
@@ -145,49 +84,91 @@ def _coerce_arguments(raw_args: dict[str, str], tool_schema: dict | None) -> dic
     return out
 
 
+def _parse_kv_lines(text: str) -> dict[str, str]:
+    """从文本中提取所有 key=value 对。"""
+    raw_args: dict[str, str] = {}
+    for m in KEY_VALUE_RE.finditer(text):
+        if m.group(2) is not None:
+            raw_args[m.group(1)] = m.group(2)
+        elif m.group(4) is not None:
+            raw_args[m.group(1)] = m.group(4)
+        else:
+            raw_args[m.group(1)] = m.group(3)
+    return raw_args
+
+
+def _find_schema(name: str, tools_schema: list[dict] | None) -> dict | None:
+    """按名称查找工具 schema。"""
+    if not tools_schema:
+        return None
+    for t in tools_schema:
+        if t.get("function", {}).get("name") == name:
+            return t["function"]
+    return None
+
+
 def parse_tool_blocks(text: str, tools_schema: list[dict] | None = None) -> tuple[str, list[dict]]:
-    """从 DeepSeek 文本里切出所有工具块，返回 (剩余文本, 工具调用列表)。
+    """从模型输出中提取所有工具块。
 
-    参数：
-        text: 完整 DeepSeek 回复
-        tools_schema: OpenAI 格式的 tools 列表（用于类型推断），形如
-            [{'function': {'name': 'Read', 'parameters': {...}}}, ...]
+    逐行状态机扫描：
+    - 遇到 "工具 名称" → 开始新工具块
+    - 遇到 key="value" → 累积参数
+    - 遇到非参数行或下一个工具 → 提交当前工具块
 
-    返回：
-        remaining_text: 去掉所有工具块之后的纯文本
-        tool_calls: [{'name': 'Bash', 'arguments': {...}}, ...]
+    返回 (剩余文本, 工具调用列表)。
     """
     if not text:
         return "", []
 
-    # 按出现顺序找到所有工具块
+    lines = text.split('\n')
     blocks: list[dict] = []
-    for m in TOOL_BLOCK_RE.finditer(text):
-        name = m.group(1).strip()
-        kv_text = m.group(2)
-        raw_args: dict[str, str] = {}
-        for km in KEY_VALUE_RE.finditer(kv_text):
-            # group(2) = 带引号的值（支持内嵌转义），group(3) = 不带引号的值
-            raw_args[km.group(1)] = km.group(2) if km.group(2) is not None else km.group(3)
+    content_lines: list[str] = []
 
-        # 找对应 schema
-        schema = None
-        if tools_schema:
-            for t in tools_schema:
-                if t.get("function", {}).get("name") == name:
-                    schema = t["function"]
-                    break
+    current_name: str | None = None
+    current_kv_lines: list[str] = []
 
+    def _commit():
+        nonlocal current_name, current_kv_lines
+        if current_name is None:
+            return
+        raw_args = _parse_kv_lines('\n'.join(current_kv_lines))
+        schema = _find_schema(current_name, tools_schema)
         blocks.append({
-            "name": name,
+            "name": current_name,
             "arguments": _expand_tilde(_coerce_arguments(raw_args, schema)),
         })
+        current_name = None
+        current_kv_lines = []
 
-    # 去掉所有工具块
-    remaining = TOOL_BLOCK_RE.sub("", text)
-    # 去掉 "工具结束"（可选 react 完成信号）
-    remaining = TOOL_END_RE.sub("", remaining)
-    # 把连续空行压成单个空行
+    for line in lines:
+        # 检查是否是工具名行
+        tm = _TOOL_LINE_RE.match(line)
+        if tm:
+            _commit()
+            current_name = tm.group(1)
+            current_kv_lines = []
+            continue
+
+        # 如果在工具块内，检查是否是参数行
+        if current_name is not None:
+            kv_match = KEY_VALUE_RE.match(line)
+            if kv_match:
+                current_kv_lines.append(line)
+                continue
+            # 非参数行 → 提交工具块，当前行归 content
+            _commit()
+
+        # 空的"工具结束"行直接跳过
+        if line.strip() == '工具结束':
+            continue
+
+        content_lines.append(line)
+
+    # 流结束，提交最后一个工具块
+    _commit()
+
+    remaining = '\n'.join(content_lines).strip()
+    # 压缩连续空行
     remaining = re.sub(r'\n{3,}', '\n\n', remaining).strip()
 
     return remaining, blocks
@@ -206,27 +187,23 @@ def build_openai_tool_call(call_id: str, name: str, arguments: dict, idx: int = 
 
 
 def json_dumps(obj: Any) -> str:
-    """JSON 序列化（统一 ensure_ascii=False，避免中文被转义）。"""
+    """JSON 序列化（ensure_ascii=False）。"""
     import json
     return json.dumps(obj, ensure_ascii=False)
 
 
-# ── 单元测试（仅直接运行时执行）─────────────────────────
+# ── 单元测试 ─────────────────────────────────────────
 
 if __name__ == "__main__":
-    # 模拟 DeepSeek 回复（含无 \n 结尾 + 无工具结束的 edge case）
-    sample = """好的，我先看看。
+    # 1. 格式规范：多工具
+    sample1 = """好的，我先看看。
 
 工具 Bash
-command="Get-ChildItem -Force"
-description="列出文件"
-工具结束
-
+command="Get-ChildItem -Name"
 工具 Read
 file_path="C:/Users/a1/Desktop/111.txt"
 offset="5"
 limit="6"
-工具结束
 
 读取完毕。
 
@@ -234,15 +211,34 @@ limit="6"
 file_path="C:/tmp/test.txt"
 content="hello"
 """
-    # 工具 schema 用于类型推断
     schema = [
-        {"function": {"name": "Bash", "parameters": {"properties": {"command": {"type": "string"}, "description": {"type": "string"}}}}},
+        {"function": {"name": "Bash", "parameters": {"properties": {"command": {"type": "string"}}}}},
         {"function": {"name": "Read", "parameters": {"properties": {"file_path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}}}}},
     ]
+    text, calls = parse_tool_blocks(sample1, schema)
+    print("=== 测试1: 格式规范 ===")
+    print("剩余:", repr(text))
+    print("调用:", calls)
 
-    text, calls = parse_tool_blocks(sample, schema)
-    print("=== 剩余文本 ===")
-    print(text)
-    print("\n=== 工具调用 ===")
-    for c in calls:
-        print(c)
+    # 2. 工具混在正文里
+    sample2 = """我先看一下目录工具 Bash
+command="Get-ChildItem -Name"
+工具结束"""
+    text2, calls2 = parse_tool_blocks(sample2)
+    print("\n=== 测试2: 混在正文里 ===")
+    print("剩余:", repr(text2))
+    print("调用:", calls2)
+
+    # 3. 截断（无闭合引号）
+    sample3 = '工具 Write\nfile_path="C:/tmp/test.txt"\ncontent="hello'
+    text3, calls3 = parse_tool_blocks(sample3)
+    print("\n=== 测试3: 截断 ===")
+    print("剩余:", repr(text3))
+    print("调用:", calls3)
+
+    # 4. 两个工具挤一行
+    sample4 = '工具 Bash\ncommand="ls" Write\nfile_path="C:/tmp/test.txt"\ncontent="hello"'
+    text4, calls4 = parse_tool_blocks(sample4)
+    print("\n=== 测试4: 两个工具挤一行 ===")
+    print("剩余:", repr(text4))
+    print("调用:", calls4)

@@ -257,6 +257,14 @@ def render_overview(cfg, usage):
       </select>
     </span>
   </div>
+  <div class="status-row"><span class="lbl">深度思考</span>
+    <span class="val">
+      <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:12px">
+        <input type="checkbox" id="thinkingToggle" onchange="toggleThinking()" {'checked' if cfg.get('thinking_enabled', True) else ''} style="width:16px;height:16px;cursor:pointer">
+        <span id="thinkingLabel">{'开启' if cfg.get('thinking_enabled', True) else '关闭'}</span>
+      </label>
+    </span>
+  </div>
 </div>
 
 <div class="card">
@@ -285,6 +293,16 @@ async function switchModel() {
         var r = await fetch('/api/config/model', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model:v}) });
         var d = await r.json();
         if (d.ok) showToast('✅ 模型已切换为 ' + d.model, true);
+        else showToast('❌ ' + (d.error||'失败'), false);
+    } catch(e) { showToast('❌ ' + e.message, false); }
+}
+async function toggleThinking() {
+    var enabled = $('thinkingToggle').checked;
+    $('thinkingLabel').textContent = enabled ? '开启' : '关闭';
+    try {
+        var r = await fetch('/api/config/thinking', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({thinking_enabled:enabled}) });
+        var d = await r.json();
+        if (d.ok) showToast('✅ 深度思考已' + (enabled ? '开启' : '关闭'), true);
         else showToast('❌ ' + (d.error||'失败'), false);
     } catch(e) { showToast('❌ ' + e.message, false); }
 }"""
