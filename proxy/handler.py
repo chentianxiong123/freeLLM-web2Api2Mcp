@@ -282,6 +282,7 @@ async def stream_response(
     tool_codec_id: str = "deepseek_natural",
     input_text: str = "",
     full_context_text: str = "",
+    on_tool_calls=None,
 ) -> AsyncIterator[str]:
     """将 Provider Event 流转换为 OpenAI SSE 消息。
 
@@ -323,8 +324,16 @@ async def stream_response(
 
     # 解析工具块：先缓冲 content，解析后再发送（避免原始工具块文本泄漏给客户端）
     full_content = "".join(content_parts)
+    # DEBUG: 记录原始模型输出
+    with open(r"D:\files\References\others\deepseek-web-agent\proxy\debug_requests\_raw_content.log", "a", encoding="utf-8") as _f:
+        _f.write(f"\n{'='*60}\n[STREAM] content_len={len(full_content)}\n{full_content}\n{'='*60}\n")
     # 始终从 content 文本中解析工具块（Qwen 可能同时有结构化 tool_call 事件和 content 中的工具块文本）
     remaining_text, parsed_calls = _detect_tool_blocks(full_content, tool_codec_id, tools_schema)
+    # DEBUG: 记录解析结果
+    if parsed_calls:
+        with open(r"D:\files\References\others\deepseek-web-agent\proxy\debug_requests\_raw_content.log", "a", encoding="utf-8") as _f:
+            for _tc in parsed_calls:
+                _f.write(f"[PARSE] name={_tc['name']} args={_tc['arguments']}\n")
     print(f"[STREAM-DBG] tool_codec_id={tool_codec_id} content_len={len(full_content)} tool_calls_acc={len(tool_calls_acc)} parsed_calls={len(parsed_calls)} remaining_len={len(remaining_text)}")
     if parsed_calls:
         print(f"[STREAM-DBG] parsed names={[tc['name'] for tc in parsed_calls]}")
@@ -340,6 +349,9 @@ async def stream_response(
             yield _make_sse_chunk(request_id, model, created, 0, {"role": "assistant", "content": ""})
         for tc in parsed_calls:
             openai_tc = _build_openai_tool_call(tc)
+            # DEBUG: 记录发给 Claude Code 的 tool_calls
+            with open(r"D:\files\References\others\deepseek-web-agent\proxy\debug_requests\_flow.log", "a", encoding="utf-8") as _f:
+                _f.write(f"[3/3] TO CLAUDE CODE\n{json.dumps(openai_tc, ensure_ascii=False, default=str)}\n{'='*60}\n")
             tool_calls_acc.append(openai_tc)
             for chunk in _stream_tool_call_chunks(request_id, model, created, openai_tc, len(tool_calls_acc) - 1):
                 yield chunk
@@ -376,6 +388,8 @@ async def stream_response(
     }
 
     finish_reason = "tool_calls" if tool_calls_acc else "stop"
+    if on_tool_calls and len(tool_calls_acc) > 1:
+        on_tool_calls(len(tool_calls_acc))
     if not role_sent:
         yield _make_sse_chunk(request_id, model, created, 0, {"role": "assistant", "content": ""}, finish_reason=finish_reason, usage=usage)
     else:

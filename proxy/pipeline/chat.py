@@ -12,6 +12,7 @@ import approval
 from prompts import manager as prompt_manager
 import rules
 import session as sess
+import tool_buffer
 from agents.registry import get_agent
 from backends.registry import get_backend
 from handler import collect_response, make_skip_response
@@ -19,6 +20,32 @@ from core.types import TurnRequest
 
 
 _req_counter = 0
+
+
+def _session_key(msgs: list[dict]) -> str:
+    """从 messages 数组生成会话标识。"""
+    import hashlib
+    raw = str([(m.get("role"), len(str(m.get("content", "")))) for m in msgs[-6:]])
+    return hashlib.md5(raw.encode()).hexdigest()[:16]
+
+
+def _extract_tool_results(msgs: list[dict]) -> list[dict]:
+    """提取末尾连续的 tool 消息，返回 [{tool_call_id, content}]。"""
+    results = []
+    for m in reversed(msgs):
+        if m.get("role") == "tool":
+            content = m.get("content", "")
+            if isinstance(content, list):
+                parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+                content = "\n".join(parts)
+            results.append({
+                "tool_call_id": m.get("tool_call_id", ""),
+                "content": content,
+            })
+        else:
+            break
+    results.reverse()
+    return results
 
 
 async def _reset_upstream_session(backend, rid: str):
@@ -97,6 +124,25 @@ async def run_chat_completion(
     import gateway
     body = gateway.strip_system_reminders_from_messages(body)
     msgs = body.get("messages", []) or []
+
+    # ── 并行工具调用缓冲 ──────────────────────────────────
+    sk = _session_key(msgs)
+    tool_results = _extract_tool_results(msgs)
+    if tool_results:
+        all_here = True
+        for tr in tool_results:
+            if not tool_buffer.buffer.add_result(sk, tr):
+                all_here = False
+        if not all_here:
+            print(f"[{rid}] TOOL-BUF buffering {len(tool_results)} result(s), waiting for more")
+            if stream:
+                from handler import stream_skip_response
+                return StreamingResponse(
+                    stream_skip_response(actual_model, request_id),
+                    media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+                )
+            return JSONResponse(content=make_skip_response(actual_model, request_id, "buffering"))
 
     # ── 检测 intercept 规则（如 /compact）────────────────
     intercept_rule = rules.find_intercept_rule(body)
@@ -224,6 +270,7 @@ async def run_chat_completion(
                 tool_codec_id=backend.tool_codec_id(),
                 input_text=final_user_content,
                 full_context_text=full_context_text,
+                on_tool_calls=lambda n: tool_buffer.buffer.record_tool_calls_sent(sk, n),
             ):
                 yield line
             output_text = "".join(captured_content)
@@ -274,6 +321,12 @@ async def run_chat_completion(
         input_text=final_user_content,
         full_context_text=full_context_text,
     )
+
+    # ── 记录 tool_calls 数量（用于并行缓冲）─────────────
+    _msg = final_resp.get("choices", [{}])[0].get("message", {})
+    _tc = _msg.get("tool_calls") or []
+    if len(_tc) > 1:
+        tool_buffer.buffer.record_tool_calls_sent(sk, len(_tc))
 
     output_text = final_resp.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
     thinking_text = final_resp.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "") or ""
