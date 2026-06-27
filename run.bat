@@ -3,7 +3,7 @@ REM DeepSeek Web Agent Proxy - background launcher (non-blocking)
 setlocal EnableExtensions
 
 set "ROOT=D:\files\References\others\deepseek-web-agent"
-set "PY=D:\uv\python\cpython-3.11.15-windows-x86_64-none\python.exe"
+set "PY=D:\files\References\others\deepseek-web-agent\.venv\Scripts\python.exe"
 set "PORT=48391"
 
 echo [run] killing old listeners on :%PORT%
