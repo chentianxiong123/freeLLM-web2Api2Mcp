@@ -123,8 +123,10 @@ async def run_chat_completion(
     tool_results = _extract_tool_results(msgs)
     combined_tool_content = None
     if tool_results:
-        tr = tool_results[-1]
-        combined = await tool_buffer.buffer.add_and_wait(sk, tr)
+        # 把所有 tool results 逐个送入 buffer，最后一个触发 flush
+        combined = None
+        for tr in tool_results:
+            combined = await tool_buffer.buffer.add_and_wait(sk, tr)
         if combined is None:
             print(f"[{rid}] TOOL-BUF already flushed, skip")
             if stream:
