@@ -19,8 +19,8 @@ _TOOL_LINE_RE = re.compile(r'^工具\s+([A-Za-z_]\w*)\s*$')
 
 
 def _unescape(s: str) -> str:
-    """还原转义。只处理 \" 和 \\，不处理 \\n \\t（路径里反斜杠不是转义）。"""
-    return s.replace('\\"', '"').replace('\\\\', '\\')
+    """还原转义。处理 \\n → 换行, \\t → 制表符, \\\" → 引号, \\\\ → 反斜杠。"""
+    return s.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace('\\\\', '\\')
 
 
 def _expand_tilde(args: dict) -> dict:
