@@ -282,7 +282,6 @@ async def stream_response(
     tool_codec_id: str = "deepseek_natural",
     input_text: str = "",
     full_context_text: str = "",
-    on_tool_calls=None,
 ) -> AsyncIterator[str]:
     """将 Provider Event 流转换为 OpenAI SSE 消息。
 
@@ -388,8 +387,6 @@ async def stream_response(
     }
 
     finish_reason = "tool_calls" if tool_calls_acc else "stop"
-    if on_tool_calls and len(tool_calls_acc) > 1:
-        on_tool_calls(len(tool_calls_acc))
     if not role_sent:
         yield _make_sse_chunk(request_id, model, created, 0, {"role": "assistant", "content": ""}, finish_reason=finish_reason, usage=usage)
     else:

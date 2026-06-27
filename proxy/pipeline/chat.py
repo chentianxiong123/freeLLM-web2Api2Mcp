@@ -130,12 +130,10 @@ async def run_chat_completion(
     tool_results = _extract_tool_results(msgs)
     combined_tool_content = None
     if tool_results:
-        all_here = True
-        for tr in tool_results:
-            if not tool_buffer.buffer.add_result(sk, tr):
-                all_here = False
-        if not all_here:
-            print(f"[{rid}] TOOL-BUF buffering {len(tool_results)} result(s), waiting for more")
+        tr = tool_results[-1]
+        combined = await tool_buffer.buffer.add_and_wait(sk, tr)
+        if combined is None:
+            print(f"[{rid}] TOOL-BUF already flushed, skip")
             if stream:
                 from handler import stream_skip_response
                 return StreamingResponse(
@@ -143,10 +141,8 @@ async def run_chat_completion(
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
                 )
-            return JSONResponse(content=make_skip_response(actual_model, request_id, "buffering"))
-        # 全部到齐，取出合并结果
-        combined = tool_buffer.buffer.get_and_clear(sk)
-        if combined and len(combined) > 1:
+            return JSONResponse(content=make_skip_response(actual_model, request_id, "buffered"))
+        if len(combined) > 1:
             combined_tool_content = "\n\n".join(
                 f"[工具结果 {i+1}/{len(combined)}] (id={r['tool_call_id']})\n{r['content']}"
                 for i, r in enumerate(combined)
@@ -254,47 +250,61 @@ async def run_chat_completion(
     _thinking = _app_cfg.get("thinking_enabled", True)
 
     if stream:
-        captured_content: list[str] = []
-        captured_thinking: list[str] = []
+        # ── 先收集全部事件（检测 tool_calls 后再创建 buffer）──
+        collected_events = []
+        async for ev in backend.chat_turn(
+            final_user_content,
+            model=actual_model,
+            account_config=account_config,
+            thinking_enabled=_thinking,
+            search_enabled=False,
+            system_prompt=system_prompt,
+        ):
+            collected_events.append(ev)
 
-        async def _capture_events():
-            async for ev in backend.chat_turn(
-                final_user_content,
-                model=actual_model,
-                account_config=account_config,
-                thinking_enabled=_thinking,
-                search_enabled=False,
-                system_prompt=system_prompt,
-            ):
-                if ev.type == "content" and isinstance(ev.val, str):
-                    captured_content.append(ev.val)
-                elif ev.type == "thinking" and isinstance(ev.val, str):
-                    captured_thinking.append(ev.val)
-                yield ev
+        # 检测 tool_calls 数量，创建 buffer（在返回响应前）
+        _content_text = ""
+        for ev in collected_events:
+            if ev.type == "content" and isinstance(ev.val, str):
+                _content_text += ev.val
+        from handler import _detect_tool_blocks
+        _remaining, _parsed_calls = _detect_tool_blocks(_content_text, backend.tool_codec_id(), tools)
+        if len(_parsed_calls) > 1:
+            tool_buffer.buffer.create(sk, len(_parsed_calls))
+            print(f"[{rid}] STREAM detected {len(_parsed_calls)} tool_calls, buffer created")
 
+        # ── 重放事件给 stream_response ────────────────────
         from handler import stream_response as _sr
+
+        async def _iter_events():
+            for ev in collected_events:
+                yield ev
 
         async def _sse_stream():
             async for line in _sr(
-                _capture_events(),
+                _iter_events(),
                 request_id=request_id,
                 model=actual_model,
                 tools_schema=tools,
                 tool_codec_id=backend.tool_codec_id(),
                 input_text=final_user_content,
                 full_context_text=full_context_text,
-                on_tool_calls=lambda n: tool_buffer.buffer.record_tool_calls_sent(sk, n),
             ):
                 yield line
-            output_text = "".join(captured_content)
-            thinking_text = "".join(captured_thinking)
+            output_text = "".join(
+                ev.val for ev in collected_events
+                if ev.type == "content" and isinstance(ev.val, str)
+            )
+            thinking_text = "".join(
+                ev.val for ev in collected_events
+                if ev.type == "thinking" and isinstance(ev.val, str)
+            )
             sess.track_message(
                 final_user_content,
                 output_text,
                 thinking_text=thinking_text,
                 session_id=account_config.get("session_id"),
             )
-            # compact 完成后：保存摘要 + 重置上游会话
             if is_compact:
                 prompt_manager.set_compact_summary(output_text)
                 print(f"[{rid}] compact summary saved ({len(output_text)} chars)")
@@ -335,11 +345,11 @@ async def run_chat_completion(
         full_context_text=full_context_text,
     )
 
-    # ── 记录 tool_calls 数量（用于并行缓冲）─────────────
+    # ── 创建并行缓冲（响应发送前）───────────────────────
     _msg = final_resp.get("choices", [{}])[0].get("message", {})
     _tc = _msg.get("tool_calls") or []
     if len(_tc) > 1:
-        tool_buffer.buffer.record_tool_calls_sent(sk, len(_tc))
+        tool_buffer.buffer.create(sk, len(_tc))
 
     output_text = final_resp.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
     thinking_text = final_resp.get("choices", [{}])[0].get("message", {}).get("reasoning_content", "") or ""
