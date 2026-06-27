@@ -88,7 +88,7 @@ def parse_sse(resp, thinking_enabled: bool = False) -> Any:
             top_message_id = obj.get("response_message_id")
             if top_message_id is not None:
                 try:
-                    yield ("message_id", int(top_message_id))
+                    yield ("message_id", str(int(top_message_id)))
                 except (ValueError, TypeError):
                     pass
 
@@ -247,44 +247,6 @@ _chat_lock = threading.Lock()
 
 # ── 聊天请求 ──────────────────────────────────────────────
 
-# 按 chat_session_id 维度记录「上一次 assistant 回复的 message_id」
-# 下一轮请求时把它作为 parent_message_id 传过去，让 DeepSeek 网页端的
-# 「对话树」自然续接（user msg → assistant msg → user msg → assistant msg ...），
-# 而不是反复创建新根消息。
-_last_response_message_id: dict[str, int] = {}
-
-
-def get_last_message_id(session_id: str) -> str | None:
-    """查询某个 session 上一次回复的 message_id（供外部测试/调试用）。"""
-    mid = _last_response_message_id.get(session_id)
-    if mid:
-        return str(mid)
-    # 从 sessions.json 恢复
-    try:
-        import session as sess
-        db = sess._load()
-        s = db.get("sessions", {}).get(session_id, {})
-        mid = s.get("last_message_id")
-        if mid:
-            _last_response_message_id[session_id] = int(mid) if isinstance(mid, str) and mid.isdigit() else mid
-            return str(mid)
-    except Exception:
-        pass
-    return None
-
-
-def reset_last_message_id(session_id: str | None = None) -> None:
-    """重置 message_id 缓存。
-
-    - 传 session_id：只重置这个 session（用于「重新生成」场景）
-    - 不传：清空所有（用于「开新会话」/「重启代理」场景）
-    """
-    global _last_response_message_id
-    if session_id is None:
-        _last_response_message_id = {}
-    else:
-        _last_response_message_id.pop(session_id, None)
-
 
 def chat_completion(
     cfg: dict,
@@ -334,10 +296,7 @@ def chat_completion(
         pow_resp = get_pow_response(cfg, session_id=session_id)
 
         # 决定 parent_message_id
-        # 优先级：调用方显式传入 > 内存缓存 > disk 持久化（session.py）
-        # disk 才是「重启也不丢续接」的关键
-        if parent_message_id is None:
-            parent_message_id = _last_response_message_id.get(session_id)
+        # 由调用方（protocol）通过 ContinuationState 传入
         if parent_message_id in (None, 0, ""):
             # DeepSeek 端：用 null 表示「创建新根消息」
             parent_message_id = None
@@ -358,10 +317,34 @@ def chat_completion(
                 print(f"[Chat] {session_id[:8]}... → NEW root message (bad mid coerced to null)")
 
         # 构建请求体
+        # 合并 system + user + tool 消息（与 Qwen 一致）
+        sys_content = ""
+        user_content = ""
+        tool_parts = []
+        for m in messages:
+            if m.get("role") == "system":
+                sys_content = m["content"]
+            elif m.get("role") == "user":
+                user_content = m.get("content", "")
+            elif m.get("role") == "assistant":
+                if "tool_calls" not in m and m.get("content"):
+                    tool_parts.append(m["content"])
+            elif m.get("role") == "tool":
+                tc_content = m.get("content", "")
+                if tc_content:
+                    if tool_parts:
+                        tool_parts.append("")
+                    tool_parts.append(tc_content)
+        all_parts = [p for p in [user_content] if p]
+        all_parts.extend(tool_parts)
+        prompt = "\n\n".join(all_parts) if all_parts else ""
+        if sys_content:
+            prompt = f"{sys_content}\n\n{prompt}" if prompt else sys_content
+
         req_body = {
             "chat_session_id": session_id,
             "parent_message_id": parent_message_id,
-            "prompt": messages[-1]["content"] if messages else "",
+            "prompt": prompt,
             "ref_file_ids": [],
             "thinking_enabled": thinking_enabled,
             "search_enabled": search_enabled,
@@ -458,8 +441,6 @@ def chat_completion(
             for etype, val in parse_sse(resp, thinking_enabled=thinking_enabled):
                 if etype == "message_id":
                     captured_id.append(val)
-                    if capture_message_id:
-                        _last_response_message_id[session_id] = val
                 elif etype == "token_usage":
                     captured_tokens.append(val)
                 yield (etype, val)

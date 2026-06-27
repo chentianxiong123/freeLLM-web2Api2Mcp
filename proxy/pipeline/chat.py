@@ -56,12 +56,6 @@ async def _reset_upstream_session(backend, rid: str):
         session_id = cfg.get("session_id")
         if session_id:
             backend._continuation.reset(session_id)
-            # 同时清掉 qwen_api 的内存缓存
-            try:
-                from backends.qwen_web import qwen_api
-                qwen_api.reset_last_message_id(session_id)
-            except Exception:
-                pass
             print(f"[{rid}] compact: continuation reset for session={session_id[:12]}...")
     except Exception as e:
         print(f"[{rid}] compact reset failed: {e}")
@@ -101,6 +95,10 @@ async def run_chat_completion(
     request_model = body.get("model") or ""
     actual_model = backend.active_model()  # 后端实际使用的模型
 
+    # ── 先剥离所有 Claude Code 注入标签（规则引擎）──────
+    body = rules.strip_tags_from_messages(body)
+    msgs = body.get("messages", []) or []
+
     print(
         f"[{rid}] agent={agent.id} backend={backend.id} model={actual_model} "
         f"request_model={request_model} msgs={len(msgs)} last={_last_user_preview(msgs)}"
@@ -119,11 +117,6 @@ async def run_chat_completion(
                 headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
             )
         return JSONResponse(content=make_skip_response(actual_model, request_id, "housekeeping"))
-
-    # ── 剥离 system-reminder（所有消息）──────────────────
-    import gateway
-    body = gateway.strip_system_reminders_from_messages(body)
-    msgs = body.get("messages", []) or []
 
     # ── 并行工具调用缓冲 ──────────────────────────────────
     sk = _session_key(msgs)
@@ -234,6 +227,7 @@ async def run_chat_completion(
     # ── 系统提示词：仅根消息（无续接点）时注入 ─────────
     session_id = account_config.get("session_id")
     is_root = not backend._continuation.get_continuation_id(session_id)
+    has_summary = bool(prompt_manager.get_compact_summary())
     system_prompt = prompt_manager.build_system_prompt() if is_root else ""
 
     # ── compact：替换 user content 为压缩指令 ──────────
@@ -241,6 +235,9 @@ async def run_chat_completion(
         final_user_content = prompt_manager.get_compact_instruction()
         system_prompt = prompt_manager.build_system_prompt()
         print(f"[{rid}] compact: replaced with instruction ({len(final_user_content)} chars)")
+    elif is_root and has_summary:
+        # 根消息用完摘要后清空，避免后续消息重复携带浪费 token
+        prompt_manager.clear_compact_summary()
 
     stream = body.get("stream", False)
     t0 = time.time()

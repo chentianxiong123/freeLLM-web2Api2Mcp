@@ -91,10 +91,4 @@ async def api_set_token(request: Request):
     if not acc:
         return JSONResponse(status_code=400, content={"ok": False, "error": "没有活跃账号"})
     accounts.update_account(acc["id"], {"token": token, "session_id": ""})
-    # 清掉续接缓存
-    try:
-        from backends.qwen_web import qwen_api
-        qwen_api.reset_last_message_id()
-    except Exception:
-        pass
     return {"ok": True, "message": "token 已更新，session 已重置"}

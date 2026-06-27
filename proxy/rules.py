@@ -386,3 +386,51 @@ def filter_response(content: str) -> tuple[str, list[dict]]:
                 pass
 
     return content.strip(), hits
+
+
+def strip_tags_from_messages(data: dict) -> dict:
+    """遍历所有消息，剥离 scope=request, action=strip 的规则匹配内容。
+
+    统一使用规则引擎，不再硬编码标签。
+    返回修改后的 body 副本。
+    """
+    import copy
+    data = copy.deepcopy(data)
+
+    # 收集所有 strip 规则的 regex pattern
+    strip_patterns = []
+    for r in list_rules():
+        if not r.get("enabled", True):
+            continue
+        if r.get("scope") != "request":
+            continue
+        if r.get("action") != "strip":
+            continue
+        pattern = r.get("pattern", "").strip()
+        if not pattern:
+            continue
+        if r.get("match_type") != "regex":
+            continue
+        try:
+            strip_patterns.append(re.compile(pattern, re.DOTALL))
+        except re.error:
+            continue
+
+    if not strip_patterns:
+        return data
+
+    def _strip(text: str) -> str:
+        for pat in strip_patterns:
+            text = pat.sub("", text)
+        return text.strip()
+
+    for msg in data.get("messages", []):
+        content = msg.get("content")
+        if isinstance(content, str):
+            msg["content"] = _strip(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    block["text"] = _strip(block.get("text") or "")
+
+    return data

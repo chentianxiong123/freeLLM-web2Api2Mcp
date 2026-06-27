@@ -92,7 +92,7 @@ class QwenProvider:
             for m in messages
         )
 
-        parent_id = self._last_message_id or api.get_last_message_id(chat_id)
+        parent_id = self._last_message_id
 
         gen = await loop.run_in_executor(
             None,

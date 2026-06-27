@@ -51,8 +51,8 @@ class QwenProtocol(UpstreamProtocol):
             for m in messages
         )
 
-        # Qwen 的续接点：优先用传入的 continuation_id，否则从 API 缓存获取
-        parent_id = continuation_id or api.get_last_message_id(conversation_id)
+        # Qwen 的续接点：由调用方（backend）通过 continuation_id 传入
+        parent_id = continuation_id
 
         loop = asyncio.get_running_loop()
         gen = await loop.run_in_executor(

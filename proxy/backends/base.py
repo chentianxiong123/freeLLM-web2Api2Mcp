@@ -75,8 +75,8 @@ class BaseBackend:
     ) -> AsyncIterator[Event]:
         """发送对话请求，返回标准事件流。
 
-        子类可以覆盖这个方法来添加自定义逻辑（如 PoW、WAF 处理）。
-        默认实现：组装配置 → 调用协议 → 桥接事件。
+        续接由本方法自动管理，子类不需要处理。
+        子类可覆盖 _resolve_config() 和 _call_protocol() 添加自定义逻辑。
         """
         cfg = ConfigResolver.resolve(self._app_config, account_config or self._account_config)
         token = cfg.get("token")
@@ -84,24 +84,61 @@ class BaseBackend:
             yield Event("error", {"message": f"未配置 {self.display_name} token"})
             return
 
-        conversation_id = cfg.get("session_id") or ""
+        # 子类可覆盖：验证/创建会话、修改 cfg
+        try:
+            cfg, conversation_id = await self._resolve_config(cfg, model)
+        except RuntimeError as e:
+            yield Event("error", {"message": str(e)})
+            return
+
+        # 自动获取续接点
         continuation_id = self._continuation.get_continuation_id(conversation_id)
 
-        gen = await self._protocol.send_message(
-            token,
-            conversation_id,
-            messages,
+        # 子类可覆盖：实际调用上游 API
+        gen = await self._call_protocol(
+            token, conversation_id, messages, cfg,
             continuation_id=continuation_id,
             model=model or cfg.get("model", self._default_model),
             thinking_enabled=thinking_enabled,
             search_enabled=search_enabled,
         )
 
+        # 桥接事件 + 自动更新续接点
         async for ev in EventBridge.bridge(gen):
-            # 自动更新续接点
             if ev.type == "message_id" and isinstance(ev.val, str):
                 self._continuation.update(conversation_id, ev.val)
             yield ev
+
+    async def _resolve_config(self, cfg: dict, model: str) -> tuple[dict, str]:
+        """子类覆盖：验证/创建会话，返回 (cfg, conversation_id)。
+
+        默认实现：直接从 cfg 取 session_id。
+        """
+        return cfg, cfg.get("session_id") or ""
+
+    async def _call_protocol(
+        self,
+        token: str,
+        conversation_id: str,
+        messages: list[dict],
+        cfg: dict,
+        *,
+        continuation_id: str | None = None,
+        model: str = "",
+        thinking_enabled: bool = True,
+        search_enabled: bool = False,
+    ):
+        """子类覆盖：实际调用 self._protocol.send_message()。
+
+        默认实现：直接调用协议。
+        """
+        return await self._protocol.send_message(
+            token, conversation_id, messages,
+            continuation_id=continuation_id,
+            model=model,
+            thinking_enabled=thinking_enabled,
+            search_enabled=search_enabled,
+        )
 
     # ── session 生命周期（委托给 session.py）──────────────
 
@@ -110,8 +147,23 @@ class BaseBackend:
         return sess.list_sessions()
 
     async def create_session(self, label: str = "", model: str = "") -> str | None:
-        """创建新会话。子类应覆盖以调用上游 API。"""
-        return None
+        """创建新会话。通过 self._protocol.create_conversation() 调用上游 API。"""
+        if not self._protocol:
+            return None
+        import accounts as _accounts
+        acc = _accounts.get_active_account()
+        if not acc:
+            return None
+        token = acc.get("token")
+        if not token:
+            return None
+        actual_model = model or acc.get("model", self._default_model)
+        sid = await self._protocol.create_conversation(token, actual_model)
+        if sid:
+            _accounts.update_account(acc["id"], {"session_id": sid, "model": actual_model})
+            import session as _sess
+            _sess.register_session(sid, label=label, model=actual_model, account_id=acc["id"])
+        return sid
 
     async def activate_session(self, session_id: str) -> bool:
         import session as sess

@@ -103,27 +103,3 @@ def is_claude_housekeeping_request(data: dict) -> bool:
         return True
 
     return False
-
-
-def strip_system_reminders_from_messages(data: dict) -> dict:
-    """遍历所有消息，剥离 <system-reminder>...</system-reminder> 块。
-
-    返回修改后的 body 副本。
-    """
-    import copy
-    data = copy.deepcopy(data)
-    for msg in data.get("messages", []):
-        content = msg.get("content")
-        if isinstance(content, str):
-            msg["content"] = re.sub(
-                r"<system-reminder>.*?</system-reminder>", "", content,
-                flags=re.DOTALL,
-            ).strip()
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    block["text"] = re.sub(
-                        r"<system-reminder>.*?</system-reminder>", "",
-                        block.get("text") or "", flags=re.DOTALL,
-                    ).strip()
-    return data

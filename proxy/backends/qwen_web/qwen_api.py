@@ -175,35 +175,6 @@ class _ThinkingParser:
         return thinking, answer
 
 
-# ── 续接缓存 ────────────────────────────────────
-_last_response_message_id: dict[str, str] = {}
-
-def get_last_message_id(chat_id: str) -> str | None:
-    """获取续接点，优先从内存缓存，其次从 sessions.json。"""
-    mid = _last_response_message_id.get(chat_id)
-    if mid:
-        return mid
-    # 从 sessions.json 恢复
-    try:
-        import session as sess
-        db = sess._load()
-        s = db.get("sessions", {}).get(chat_id, {})
-        mid = s.get("last_message_id")
-        if mid:
-            _last_response_message_id[chat_id] = str(mid)
-            return str(mid)
-    except Exception:
-        pass
-    return None
-
-def reset_last_message_id(chat_id: str | None = None) -> None:
-    global _last_response_message_id
-    if chat_id is None:
-        _last_response_message_id = {}
-    else:
-        _last_response_message_id.pop(chat_id, None)
-
-
 def chat_completion(
     token: str,
     chat_id: str,
@@ -241,15 +212,29 @@ def chat_completion(
 
         content = ""
         sys_content = ""
+        tool_parts = []
         for m in messages:
             if m.get("role") == "system":
                 sys_content = m["content"]
             elif m.get("role") == "user":
                 content = m.get("content", "")
-        if sys_content and content:
-            content = f"{sys_content}\n\n{content}"
-        elif sys_content and not content:
-            content = sys_content
+            elif m.get("role") == "assistant":
+                # assistant 消息：带 tool_calls 的不拼，纯文本的拼
+                if "tool_calls" not in m and m.get("content"):
+                    tool_parts.append(m["content"])
+            elif m.get("role") == "tool":
+                # tool 结果：每个结果之间加空行分隔
+                tc_content = m.get("content", "")
+                if tc_content:
+                    if tool_parts:
+                        tool_parts.append("")  # 空行分隔
+                    tool_parts.append(tc_content)
+        # 拼接：user content + tool results，用空行分隔
+        all_parts = [p for p in [content] if p]
+        all_parts.extend(tool_parts)
+        content = "\n\n".join(all_parts) if all_parts else ""
+        if sys_content:
+            content = f"{sys_content}\n\n{content}" if content else sys_content
 
         fid = _rand_id()
         child_id = _rand_id()
@@ -341,18 +326,6 @@ def chat_completion(
                         if payload == "[DONE]":
                             yield from _finish_stream(accum_content, sent_content_len, accum_thinking, sent_thinking_len, response_id, usage_data, chat_id)
                             return
-                        # 先检查原始 JSON 是否含错误（rate limit 等）
-                        try:
-                            _raw_obj = json.loads(payload)
-                            if isinstance(_raw_obj, dict):
-                                _err = _raw_obj.get("error") or _raw_obj.get("message")
-                                if _err:
-                                    if isinstance(_err, dict):
-                                        _err = _err.get("message", str(_err))
-                                    yield ("error", {"message": f"Qwen API 错误: {_err}"})
-                                    return
-                        except (json.JSONDecodeError, AttributeError):
-                            pass
                         parsed = _parse_sse_line(payload)
                         # 捕获 response_id（从第二帧起的顶层字段）
                         rid = parsed.get("response_id")
@@ -432,7 +405,6 @@ def _finish_stream(accum_content, sent_content_len, accum_thinking, sent_thinkin
         if diff:
             yield ("thinking", diff)
     if response_id:
-        _last_response_message_id[chat_id] = response_id
         yield ("message_id", response_id)
     if usage_data:
         yield ("usage", usage_data)

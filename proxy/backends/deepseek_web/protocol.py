@@ -51,16 +51,19 @@ class DeepSeekProtocol(UpstreamProtocol):
         model: str = "",
         thinking_enabled: bool = True,
         search_enabled: bool = False,
+        headers: dict | None = None,
     ) -> Generator:
         """发送消息，返回同步 (etype, val) generator。"""
         cfg = {"token": token, "session_id": conversation_id}
+        if headers:
+            cfg["headers"] = headers
         model_type = self._resolve_model_type(model)
 
         loop = asyncio.get_running_loop()
         gen = await loop.run_in_executor(
             None,
             _create_gen,
-            cfg, messages, model, model_type, thinking_enabled, search_enabled,
+            cfg, messages, model, model_type, thinking_enabled, search_enabled, continuation_id,
         )
         return gen
 
@@ -70,7 +73,7 @@ class DeepSeekProtocol(UpstreamProtocol):
         return self._MODEL_TYPE_MAP.get(model, "default")
 
 
-def _create_gen(cfg, messages, model, model_type, thinking_enabled, search_enabled):
+def _create_gen(cfg, messages, model, model_type, thinking_enabled, search_enabled, parent_message_id=None):
     """Helper: 在 executor 中创建同步 generator。"""
     return ds_api.chat_completion(
         cfg,
@@ -80,4 +83,5 @@ def _create_gen(cfg, messages, model, model_type, thinking_enabled, search_enabl
         thinking_enabled=thinking_enabled,
         search_enabled=search_enabled,
         stream=True,
+        parent_message_id=parent_message_id,
     )
