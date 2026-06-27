@@ -262,6 +262,15 @@ async def run_chat_completion(
         ):
             collected_events.append(ev)
 
+        # 检查是否有错误事件 → 直接返回 HTTP 错误
+        for ev in collected_events:
+            if ev.type == "error":
+                err_msg = ev.val.get("message", str(ev.val)) if isinstance(ev.val, dict) else str(ev.val)
+                print(f"[{rid}] ERROR from backend: {err_msg}")
+                return JSONResponse(status_code=502, content={
+                    "error": {"message": err_msg, "type": "upstream_error"},
+                })
+
         # 检测 tool_calls 数量，创建 buffer（在返回响应前）
         _content_text = ""
         for ev in collected_events:
@@ -330,6 +339,15 @@ async def run_chat_completion(
         system_prompt=system_prompt,
     ):
         collected.append(ev)
+
+    # 检查是否有错误事件 → 直接返回 HTTP 错误
+    for ev in collected:
+        if ev.type == "error":
+            err_msg = ev.val.get("message", str(ev.val)) if isinstance(ev.val, dict) else str(ev.val)
+            print(f"[{rid}] ERROR from backend: {err_msg}")
+            return JSONResponse(status_code=502, content={
+                "error": {"message": err_msg, "type": "upstream_error"},
+            })
 
     async def _iter(items):
         for item in items:
