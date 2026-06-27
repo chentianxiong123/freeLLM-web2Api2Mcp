@@ -10,7 +10,7 @@ from typing import Any
 
 # 单个 key="value" 行
 KEY_VALUE_RE = re.compile(
-    r'^[ \t]*([A-Za-z_]\w*)[ \t]*=[ \t]*(?:"((?:\\.|[^"\\])*)"|(\S+)|"((?:\\.|[^"\\])*?)\s*$)',
+    r'^[ \t]*([A-Za-z_]\w*)[ \t]*=[ \t]*(?:"((?:\\.|[^"\\])*)"|"((?:\\.|[^"\\])*?)[ \t]*\Z|(\S+))',
     re.MULTILINE,
 )
 
@@ -90,10 +90,10 @@ def _parse_kv_lines(text: str) -> dict[str, str]:
     for m in KEY_VALUE_RE.finditer(text):
         if m.group(2) is not None:
             raw_args[m.group(1)] = m.group(2)
-        elif m.group(4) is not None:
-            raw_args[m.group(1)] = m.group(4)
-        else:
+        elif m.group(3) is not None:
             raw_args[m.group(1)] = m.group(3)
+        else:
+            raw_args[m.group(1)] = m.group(4)
     return raw_args
 
 
@@ -110,9 +110,10 @@ def _find_schema(name: str, tools_schema: list[dict] | None) -> dict | None:
 def parse_tool_blocks(text: str, tools_schema: list[dict] | None = None) -> tuple[str, list[dict]]:
     """从模型输出中提取所有工具块。
 
-    逐行状态机扫描：
+    逐行状态机扫描（支持引号内换行）：
     - 遇到 "工具 名称" → 开始新工具块
-    - 遇到 key="value" → 累积参数
+    - 遇到 key="value" 或 key="value（未闭合） → 累积参数
+    - 引号未闭合时继续读行直到遇到闭合 "
     - 遇到非参数行或下一个工具 → 提交当前工具块
 
     返回 (剩余文本, 工具调用列表)。
@@ -126,9 +127,19 @@ def parse_tool_blocks(text: str, tools_schema: list[dict] | None = None) -> tupl
 
     current_name: str | None = None
     current_kv_lines: list[str] = []
+    in_quote = False       # 正在收集引号内的多行值
+    quote_key = ""         # 当前引号值对应的 key
+    quote_lines: list[str] = []  # 引号内收集的行
 
     def _commit():
-        nonlocal current_name, current_kv_lines
+        nonlocal current_name, current_kv_lines, in_quote, quote_key, quote_lines
+        if in_quote:
+            # 引号未闭合，把收集的内容拼回去
+            full_line = quote_key + '="' + '\n'.join(quote_lines)
+            current_kv_lines.append(full_line)
+            in_quote = False
+            quote_key = ""
+            quote_lines = []
         if current_name is None:
             return
         raw_args = _parse_kv_lines('\n'.join(current_kv_lines))
@@ -141,6 +152,21 @@ def parse_tool_blocks(text: str, tools_schema: list[dict] | None = None) -> tupl
         current_kv_lines = []
 
     for line in lines:
+        line = line.rstrip('\r')
+        # 如果正在收集引号内的多行值
+        if in_quote:
+            if '"' in line:
+                # 找到闭合引号 → 结束引号收集
+                quote_lines.append(line)
+                full_line = quote_key + '="' + '\n'.join(quote_lines)
+                current_kv_lines.append(full_line)
+                in_quote = False
+                quote_key = ""
+                quote_lines = []
+            else:
+                quote_lines.append(line)
+            continue
+
         # 检查是否是工具名行
         tm = _TOOL_LINE_RE.match(line)
         if tm:
@@ -153,7 +179,18 @@ def parse_tool_blocks(text: str, tools_schema: list[dict] | None = None) -> tupl
         if current_name is not None:
             kv_match = KEY_VALUE_RE.match(line)
             if kv_match:
-                current_kv_lines.append(line)
+                # 检查引号是否闭合：group(2) 有值说明闭合了
+                if kv_match.group(2) is not None:
+                    # 正常闭合的 key="value"
+                    current_kv_lines.append(line)
+                elif kv_match.group(3) is not None:
+                    # 未闭合的 key="value（到行尾）
+                    in_quote = True
+                    quote_key = kv_match.group(1)
+                    quote_lines = [kv_match.group(3)]
+                else:
+                    # 无引号的值
+                    current_kv_lines.append(line)
                 continue
             # 非参数行 → 提交工具块，当前行归 content
             _commit()
