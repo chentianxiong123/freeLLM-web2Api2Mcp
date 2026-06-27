@@ -25,12 +25,44 @@ def _parse_kv_line(line: str) -> tuple[str, str] | None:
     return key, raw
 
 
+def _unescape_string(s: str) -> str:
+    """状态机反转义：把字面量 \\n \\t \\\\ \\\" 还原为实际控制字符。
+
+    模型输出的工具参数中，转义序列是两个字面字符（如反斜杠+n），
+    需要还原为真实字符（如换行符 0x0A）。
+    """
+    result: list[str] = []
+    i = 0
+    n = len(s)
+    while i < n:
+        if s[i] == '\\' and i + 1 < n:
+            ch = s[i + 1]
+            if ch == 'n':
+                result.append('\n')
+            elif ch == 't':
+                result.append('\t')
+            elif ch == '"':
+                result.append('"')
+            elif ch == "'":
+                result.append("'")
+            elif ch == '\\':
+                result.append('\\')
+            else:
+                result.append(s[i])
+                result.append(ch)
+            i += 2
+        else:
+            result.append(s[i])
+            i += 1
+    return ''.join(result)
+
+
 def _build_json_and_parse(tool_name: str, kv_lines: list[str]) -> dict | None:
     pairs: dict[str, str] = {}
     for line in kv_lines:
         result = _parse_kv_line(line)
         if result:
-            pairs[result[0]] = result[1]
+            pairs[result[0]] = _unescape_string(result[1])
     if not pairs:
         return None
     json_obj = {"name": tool_name, **pairs}
