@@ -290,6 +290,11 @@ def chat_completion(
         response_id = None
         usage_data = None
 
+        # DEBUG: 记录发给 Qwen 的请求
+        _dbg_path = r"D:\files\References\others\deepseek-web-agent\proxy\debug_requests\_flow.log"
+        with open(_dbg_path, "a", encoding="utf-8") as _f:
+            _f.write(f"\n{'='*60}\n[1/3] SEND TO QWEN\n{json.dumps(req_body, ensure_ascii=False, default=str)[:5000]}\n{'='*60}\n")
+
         with httpx.Client(timeout=120) as client:
             with client.stream(
                 "POST",
@@ -381,6 +386,9 @@ def chat_completion(
                             else:
                                 accum_content += raw_content
                             if len(accum_content) > sent_content_len:
+                                # DEBUG: 记录 Qwen 返回的原始 content
+                                with open(_dbg_path, "a", encoding="utf-8") as _f:
+                                    _f.write(f"[2/3] QWEN RAW CONTENT (len={len(accum_content)})\n{accum_content}\n{'─'*40}\n")
                                 yield ("content", accum_content[sent_content_len:])
                                 sent_content_len = len(accum_content)
                         else:

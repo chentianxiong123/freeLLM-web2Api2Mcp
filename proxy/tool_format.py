@@ -1,30 +1,80 @@
 """工具调用响应解析器
 
-从模型输出中提取工具块，转成 {name, arguments} 结构。
-支持格式错乱、截断、工具混在正文里等边界情况。
+从模型输出中提取工具块，内部拼成 JSON 用 json.loads() 解析。
 """
 
+import json
 import os
 import re
 from typing import Any
 
-# 单个 key="value" 行
-KEY_VALUE_RE = re.compile(
-    r'^[ \t]*([A-Za-z_]\w*)[ \t]*=[ \t]*(?:"((?:\\.|[^"\\])*)"|"((?:\\.|[^"\\])*?)[ \t]*\Z|(\S+))',
-    re.MULTILINE,
-)
-
-# 工具名行：行首 "工具 名称"
-_TOOL_LINE_RE = re.compile(r'^工具\s+([A-Za-z_]\w*)\s*$')
+_TOOL_LINE_RE = re.compile(r'^(?:工具|Tool)\s+([A-Za-z_]\w*)\s*$')
+_KV_RE = re.compile(r'^[ \t]*([A-Za-z_]\w*)[ \t]*=[ \t]*(.*)[ \t]*$')
 
 
-def _unescape(s: str) -> str:
-    """还原转义。处理 \\n → 换行, \\t → 制表符, \\\" → 引号, \\\\ → 反斜杠。"""
-    return s.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace('\\\\', '\\')
+def _parse_kv_line(line: str) -> tuple[str, str] | None:
+    m = _KV_RE.match(line)
+    if not m:
+        return None
+    key = m.group(1)
+    raw = m.group(2).strip()
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        raw = raw[1:-1]
+    elif len(raw) >= 2 and raw[0] == '"' and '"' not in raw[1:]:
+        raw = raw[1:]
+    return key, raw
+
+
+def _build_json_and_parse(tool_name: str, kv_lines: list[str]) -> dict | None:
+    pairs: dict[str, str] = {}
+    for line in kv_lines:
+        result = _parse_kv_line(line)
+        if result:
+            pairs[result[0]] = result[1]
+    if not pairs:
+        return None
+    json_obj = {"name": tool_name, **pairs}
+    try:
+        return json.loads(json.dumps(json_obj, ensure_ascii=False))
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def _apply_schema_types(args: dict, tool_schema: dict | None) -> dict:
+    if not tool_schema:
+        return args
+    props = (tool_schema.get("parameters") or {}).get("properties") or {}
+    out = {}
+    for k, v in args.items():
+        if not isinstance(v, str):
+            out[k] = v
+            continue
+        t = (props.get(k) or {}).get("type")
+        if t == "integer":
+            try:
+                out[k] = int(v)
+                continue
+            except (ValueError, TypeError):
+                pass
+        elif t == "number":
+            try:
+                f = float(v)
+                out[k] = int(f) if f.is_integer() else f
+                continue
+            except (ValueError, TypeError):
+                pass
+        elif t == "boolean":
+            if v == "true":
+                out[k] = True
+                continue
+            elif v == "false":
+                out[k] = False
+                continue
+        out[k] = v
+    return out
 
 
 def _expand_tilde(args: dict) -> dict:
-    """展开 ~/X 为绝对路径。"""
     if not isinstance(args, dict):
         return args
     home = None
@@ -49,56 +99,7 @@ def _expand_tilde(args: dict) -> dict:
     return out
 
 
-def _infer_type(value: str, schema_type: str | None) -> Any:
-    """按 schema 类型推断值。"""
-    if schema_type == "integer":
-        try:
-            return int(value)
-        except (ValueError, TypeError):
-            return value
-    if schema_type == "number":
-        try:
-            v = float(value)
-            return int(v) if v.is_integer() else v
-        except (ValueError, TypeError):
-            return value
-    if schema_type == "boolean":
-        if value == "true":
-            return True
-        if value == "false":
-            return False
-        return value
-    return value
-
-
-def _coerce_arguments(raw_args: dict[str, str], tool_schema: dict | None) -> dict:
-    """按 schema 转换参数类型。"""
-    if not tool_schema:
-        return {k: _unescape(v) for k, v in raw_args.items()}
-    props = (tool_schema.get("parameters") or {}).get("properties") or {}
-    out = {}
-    for k, v in raw_args.items():
-        unescaped = _unescape(v)
-        schema_type = (props.get(k) or {}).get("type")
-        out[k] = _infer_type(unescaped, schema_type)
-    return out
-
-
-def _parse_kv_lines(text: str) -> dict[str, str]:
-    """从文本中提取所有 key=value 对。"""
-    raw_args: dict[str, str] = {}
-    for m in KEY_VALUE_RE.finditer(text):
-        if m.group(2) is not None:
-            raw_args[m.group(1)] = m.group(2)
-        elif m.group(3) is not None:
-            raw_args[m.group(1)] = m.group(3)
-        else:
-            raw_args[m.group(1)] = m.group(4)
-    return raw_args
-
-
 def _find_schema(name: str, tools_schema: list[dict] | None) -> dict | None:
-    """按名称查找工具 schema。"""
     if not tools_schema:
         return None
     for t in tools_schema:
@@ -108,174 +109,88 @@ def _find_schema(name: str, tools_schema: list[dict] | None) -> dict | None:
 
 
 def parse_tool_blocks(text: str, tools_schema: list[dict] | None = None) -> tuple[str, list[dict]]:
-    """从模型输出中提取所有工具块。
-
-    逐行状态机扫描（支持引号内换行）：
-    - 遇到 "工具 名称" → 开始新工具块
-    - 遇到 key="value" 或 key="value（未闭合） → 累积参数
-    - 引号未闭合时继续读行直到遇到闭合 "
-    - 遇到非参数行或下一个工具 → 提交当前工具块
-
-    返回 (剩余文本, 工具调用列表)。
-    """
     if not text:
         return "", []
 
     lines = text.split('\n')
     blocks: list[dict] = []
     content_lines: list[str] = []
-
     current_name: str | None = None
     current_kv_lines: list[str] = []
-    in_quote = False       # 正在收集引号内的多行值
-    quote_key = ""         # 当前引号值对应的 key
-    quote_lines: list[str] = []  # 引号内收集的行
 
     def _commit():
-        nonlocal current_name, current_kv_lines, in_quote, quote_key, quote_lines
-        if in_quote:
-            # 引号未闭合，把收集的内容拼回去
-            full_line = quote_key + '="' + '\n'.join(quote_lines)
-            current_kv_lines.append(full_line)
-            in_quote = False
-            quote_key = ""
-            quote_lines = []
+        nonlocal current_name, current_kv_lines
         if current_name is None:
             return
-        raw_args = _parse_kv_lines('\n'.join(current_kv_lines))
         schema = _find_schema(current_name, tools_schema)
-        blocks.append({
-            "name": current_name,
-            "arguments": _expand_tilde(_coerce_arguments(raw_args, schema)),
-        })
+        parsed = _build_json_and_parse(current_name, current_kv_lines)
+        if parsed:
+            parsed.pop("name", None)
+            parsed = _apply_schema_types(parsed, schema)
+            parsed = _expand_tilde(parsed)
+            blocks.append({"name": current_name, "arguments": parsed})
         current_name = None
         current_kv_lines = []
 
-    for line in lines:
-        line = line.rstrip('\r')
-        # 如果正在收集引号内的多行值
-        if in_quote:
-            if '"' in line:
-                # 找到闭合引号 → 结束引号收集
-                quote_lines.append(line)
-                full_line = quote_key + '="' + '\n'.join(quote_lines)
-                current_kv_lines.append(full_line)
-                in_quote = False
-                quote_key = ""
-                quote_lines = []
-            else:
-                quote_lines.append(line)
-            continue
-
-        # 检查是否是工具名行
-        tm = _TOOL_LINE_RE.match(line)
+    for i, line in enumerate(lines):
+        ls = line.rstrip('\r')
+        tm = _TOOL_LINE_RE.match(ls)
         if tm:
             _commit()
             current_name = tm.group(1)
             current_kv_lines = []
             continue
-
-        # 如果在工具块内，检查是否是参数行
         if current_name is not None:
-            kv_match = KEY_VALUE_RE.match(line)
-            if kv_match:
-                # 检查引号是否闭合：group(2) 有值说明闭合了
-                if kv_match.group(2) is not None:
-                    # 正常闭合的 key="value"
-                    current_kv_lines.append(line)
-                elif kv_match.group(3) is not None:
-                    # 未闭合的 key="value（到行尾）
-                    in_quote = True
-                    quote_key = kv_match.group(1)
-                    quote_lines = [kv_match.group(3)]
-                else:
-                    # 无引号的值
-                    current_kv_lines.append(line)
+            kv = _parse_kv_line(ls)
+            if kv:
+                current_kv_lines.append(ls)
                 continue
-            # 非参数行 → 提交工具块，当前行归 content
-            _commit()
+            if ls.strip() == '':
+                # 空行：预览下一行，如果是 key=value 或工具名则继续
+                next_ls = lines[i + 1].rstrip('\r') if i + 1 < len(lines) else ''
+                if _parse_kv_line(next_ls) or _TOOL_LINE_RE.match(next_ls):
+                    continue
+                # 否则提交工具块
+                _commit()
+            else:
+                _commit()
+        content_lines.append(ls)
 
-        # 空的"工具结束"行直接跳过
-        if line.strip() == '工具结束':
-            continue
-
-        content_lines.append(line)
-
-    # 流结束，提交最后一个工具块
     _commit()
-
     remaining = '\n'.join(content_lines).strip()
-    # 压缩连续空行
     remaining = re.sub(r'\n{3,}', '\n\n', remaining).strip()
-
     return remaining, blocks
 
 
 def build_openai_tool_call(call_id: str, name: str, arguments: dict, idx: int = 0) -> dict:
-    """构造 OpenAI tool_calls 单个元素。"""
     return {
         "id": call_id,
         "type": "function",
         "function": {
             "name": name,
-            "arguments": json_dumps(arguments),
+            "arguments": json.dumps(arguments, ensure_ascii=False),
         },
     }
 
 
-def json_dumps(obj: Any) -> str:
-    """JSON 序列化（ensure_ascii=False）。"""
-    import json
-    return json.dumps(obj, ensure_ascii=False)
-
-
-# ── 单元测试 ─────────────────────────────────────────
-
 if __name__ == "__main__":
-    # 1. 格式规范：多工具
-    sample1 = """好的，我先看看。
-
-工具 Bash
-command="Get-ChildItem -Name"
-工具 Read
-file_path="C:/Users/a1/Desktop/111.txt"
-offset="5"
-limit="6"
-
-读取完毕。
-
-工具 Write
-file_path="C:/tmp/test.txt"
-content="hello"
-"""
-    schema = [
-        {"function": {"name": "Bash", "parameters": {"properties": {"command": {"type": "string"}}}}},
-        {"function": {"name": "Read", "parameters": {"properties": {"file_path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}}}}},
+    tests = [
+        ("无引号", "工具 Bash\ncommand=echo hello world"),
+        ("有引号", '工具 Write\nfile_path="C:/tmp/test.txt"\ncontent="hello"'),
+        ("content 含 \\n", "工具 Write\nfile_path=C:/tmp/test.txt\ncontent=line1\\nline2\\nline3"),
+        ("反斜杠路径", "工具 Bash\ncommand=D:\\files\\test.py"),
+        ("content 含工具关键词", "工具 Bash\ncommand=echo 不要使用 工具 Write\n\n这里有个陷阱"),
+        ("多行 content + 空行", "工具 Write\nfile_path=C:/tmp/test.md\ncontent=# 标题\n\n## 第一节\n内容"),
+        ("多工具", "工具 Bash\ncommand=echo 1\n\n工具 Bash\ncommand=echo 2"),
+        ("空值", "工具 Write\nfile_path=C:/tmp/test.txt\ncontent="),
+        ("Tool 大写", "Tool Bash\ncommand=echo hello"),
+        ("混合引号", '工具 Write\nfile_path="C:/tmp/test.txt"\ncontent=hello world'),
+        ("多工具连续", "工具 Bash\ncommand=echo 1\n工具 Read\nfile_path=C:/tmp/test.txt"),
+        ("正文+工具+正文", "这是正文\n\n工具 Bash\ncommand=echo 1\n\n这是更多正文"),
     ]
-    text, calls = parse_tool_blocks(sample1, schema)
-    print("=== 测试1: 格式规范 ===")
-    print("剩余:", repr(text))
-    print("调用:", calls)
-
-    # 2. 工具混在正文里
-    sample2 = """我先看一下目录工具 Bash
-command="Get-ChildItem -Name"
-工具结束"""
-    text2, calls2 = parse_tool_blocks(sample2)
-    print("\n=== 测试2: 混在正文里 ===")
-    print("剩余:", repr(text2))
-    print("调用:", calls2)
-
-    # 3. 截断（无闭合引号）
-    sample3 = '工具 Write\nfile_path="C:/tmp/test.txt"\ncontent="hello'
-    text3, calls3 = parse_tool_blocks(sample3)
-    print("\n=== 测试3: 截断 ===")
-    print("剩余:", repr(text3))
-    print("调用:", calls3)
-
-    # 4. 两个工具挤一行
-    sample4 = '工具 Bash\ncommand="ls" Write\nfile_path="C:/tmp/test.txt"\ncontent="hello"'
-    text4, calls4 = parse_tool_blocks(sample4)
-    print("\n=== 测试4: 两个工具挤一行 ===")
-    print("剩余:", repr(text4))
-    print("调用:", calls4)
+    for name, text in tests:
+        remaining, calls = parse_tool_blocks(text)
+        print(f"=== {name} ===")
+        print(f"  remaining: {repr(remaining[:80])}")
+        print(f"  calls: {calls}")
+        print()
