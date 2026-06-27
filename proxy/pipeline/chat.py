@@ -128,6 +128,7 @@ async def run_chat_completion(
     # ── 并行工具调用缓冲 ──────────────────────────────────
     sk = _session_key(msgs)
     tool_results = _extract_tool_results(msgs)
+    combined_tool_content = None
     if tool_results:
         all_here = True
         for tr in tool_results:
@@ -143,6 +144,14 @@ async def run_chat_completion(
                     headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
                 )
             return JSONResponse(content=make_skip_response(actual_model, request_id, "buffering"))
+        # 全部到齐，取出合并结果
+        combined = tool_buffer.buffer.get_and_clear(sk)
+        if combined and len(combined) > 1:
+            combined_tool_content = "\n\n".join(
+                f"[工具结果 {i+1}/{len(combined)}] (id={r['tool_call_id']})\n{r['content']}"
+                for i, r in enumerate(combined)
+            )
+            print(f"[{rid}] TOOL-BUF combined {len(combined)} results → {len(combined_tool_content)} chars")
 
     # ── 检测 intercept 规则（如 /compact）────────────────
     intercept_rule = rules.find_intercept_rule(body)
@@ -204,6 +213,10 @@ async def run_chat_completion(
 
     cleaned_content, _strip_hits = rules.clean_request_content(final_user_content)
     final_user_content = cleaned_content or "(empty after strip)"
+
+    # 并行工具调用：用合并结果覆盖
+    if combined_tool_content:
+        final_user_content = combined_tool_content
 
     # 构建完整上下文文本（所有 messages 拼接），用于计算 cached_tokens
     full_context_text = ""

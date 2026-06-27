@@ -47,14 +47,13 @@ class ToolResultBuffer:
         with self._lock:
             buf = self._buffers.get(session_id)
             if buf is None:
-                return True  # 没有缓冲需求，直接处理
+                # 没有预期缓冲 — 单工具场景，直接放行
+                return True
 
             buf.results.append(tool_result)
             print(f"[TOOL-BUF] session={session_id[:8]} got={len(buf.results)}/{buf.expected}")
 
-            if len(buf.results) >= buf.expected:
-                return True  # 全部到齐
-            return False  # 还在等
+            return len(buf.results) >= buf.expected
 
     def get_and_clear(self, session_id: str) -> list[dict] | None:
         """获取并清空缓冲。返回 None 表示无缓冲。"""
