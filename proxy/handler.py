@@ -337,12 +337,7 @@ async def stream_response(
     if parsed_calls:
         print(f"[STREAM-DBG] parsed names={[tc['name'] for tc in parsed_calls]}")
     if parsed_calls and not tool_calls_acc:
-        # 文本解析出工具调用，且没有结构化 tool_call 事件 → 用文本解析结果
-        if remaining_text:
-            if not role_sent:
-                role_sent = True
-                yield _make_sse_chunk(request_id, model, created, 0, {"role": "assistant", "content": ""})
-            yield _make_sse_chunk(request_id, model, created, 0, {"content": remaining_text})
+        # 文本解析出工具调用，且没有结构化 tool_call 事件 → 只发 tool_call，不发 remaining_text
         if not role_sent:
             role_sent = True
             yield _make_sse_chunk(request_id, model, created, 0, {"role": "assistant", "content": ""})
@@ -356,8 +351,9 @@ async def stream_response(
                 yield chunk
     else:
         # 无文本工具块，或已有结构化 tool_call → 发送清理后的 content（去掉工具块文本）
+        # 但如果已有结构化 tool_call，不发文字内容（避免 Claude Code 重复处理）
         clean_content = remaining_text if parsed_calls else full_content
-        if clean_content:
+        if clean_content and not tool_calls_acc:
             if not role_sent:
                 role_sent = True
                 yield _make_sse_chunk(request_id, model, created, 0, {"role": "assistant", "content": ""})
