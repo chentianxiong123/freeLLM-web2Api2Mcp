@@ -25,14 +25,13 @@ import config
 from utils.json_store import JsonStore
 
 # Token 估算：不分语言，统一 char/2（中英文混合的经验值）
-TOKEN_EST_RATIO = 2.0  # 每个 token 平均 2 字符
-
-
 def _estimate_tokens(text: str) -> int:
-    """粗略估算 token 数。DS 不返回精确值，按字符数估算。"""
+    """粗略估算 token 数。Qwen tokenizer：中文 ~1.65 字符/token，英文 ~3.5 字符/token。"""
     if not text:
         return 0
-    return max(1, int(len(text) / TOKEN_EST_RATIO))
+    cn = sum(1 for c in text if '\u4e00' <= c <= '\u9fff' or '\u3400' <= c <= '\u4dbf')
+    en = len(text) - cn
+    return max(1, int(cn / 1.65 + en / 3.5))
 
 
 def _migrate_session(raw: dict) -> dict:

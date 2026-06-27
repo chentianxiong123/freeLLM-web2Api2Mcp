@@ -216,12 +216,12 @@ async def collect_response(
     # cc-switch 公式：input_tokens = prompt_tokens - cached_tokens
     full_content = "".join(content_parts)
     thinking_text_for_usage = "\n".join(thinking_parts) if thinking_parts else ""
-    _est = lambda t: max(1, len(t) // 2) if t else 0
-    prompt_est = _est(input_text)
-    context_est = _est(full_context_text)
+    from session import _estimate_tokens
+    prompt_est = _estimate_tokens(input_text)
+    context_est = _estimate_tokens(full_context_text)
     cached_est = max(0, context_est - prompt_est)
-    completion_est = _est(full_content)
-    reasoning_est = _est(thinking_text_for_usage)
+    completion_est = _estimate_tokens(full_content)
+    reasoning_est = _estimate_tokens(thinking_text_for_usage)
     usage = {
         "prompt_tokens": context_est,
         "completion_tokens": completion_est + reasoning_est,
@@ -364,12 +364,12 @@ async def stream_response(
     # cc-switch 公式：input_tokens = prompt_tokens - cached_tokens
     full_content = "".join(content_parts)
     thinking_text = "\n".join(thinking_parts) if thinking_parts else ""
-    _est = lambda t: max(1, len(t) // 2) if t else 0
-    prompt_est = _est(input_text)
-    context_est = _est(full_context_text)
+    from session import _estimate_tokens
+    prompt_est = _estimate_tokens(input_text)
+    context_est = _estimate_tokens(full_context_text)
     cached_est = max(0, context_est - prompt_est)
-    completion_est = _est(full_content)
-    reasoning_est = _est(thinking_text)
+    completion_est = _estimate_tokens(full_content)
+    reasoning_est = _estimate_tokens(thinking_text)
     usage = {
         "prompt_tokens": context_est,
         "completion_tokens": completion_est + reasoning_est,
