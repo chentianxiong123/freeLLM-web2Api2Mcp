@@ -341,9 +341,19 @@ def chat_completion(
                         if payload == "[DONE]":
                             yield from _finish_stream(accum_content, sent_content_len, accum_thinking, sent_thinking_len, response_id, usage_data, chat_id)
                             return
+                        # 先检查原始 JSON 是否含错误（rate limit 等）
+                        try:
+                            _raw_obj = json.loads(payload)
+                            if isinstance(_raw_obj, dict):
+                                _err = _raw_obj.get("error") or _raw_obj.get("message")
+                                if _err:
+                                    if isinstance(_err, dict):
+                                        _err = _err.get("message", str(_err))
+                                    yield ("error", {"message": f"Qwen API 错误: {_err}"})
+                                    return
+                        except (json.JSONDecodeError, AttributeError):
+                            pass
                         parsed = _parse_sse_line(payload)
-                        if parsed is None:
-                            continue
                         # 捕获 response_id（从第二帧起的顶层字段）
                         rid = parsed.get("response_id")
                         if rid and not response_id:
