@@ -137,6 +137,7 @@ HTML = """<!doctype html>
       <button onclick="saveSettings()">保存</button>
       <button onclick="exportState()">导出登录态</button>
       <button onclick="importState()">导入登录态</button>
+      <button onclick="runHealthCheck()">🔎 一键健康检查</button>
     </div>
   </div>
   <div class="grid" id="grid"><div class="card">加载中…</div></div>
@@ -219,6 +220,16 @@ async function importState() {
     const r = await j('/api/state/import', {method:'POST'});
     alert('已注入 ' + r.count + ' 个 cookie');
   } catch(e) { alert('导入失败: ' + e.message); }
+}
+async function runHealthCheck() {
+  if (!confirm('全自动健康检查：连浏览器检测所有平台登录态（约30-60s）？')) return;
+  try {
+    const r = await j('/api/check_all', {method:'POST'});
+    const ok = r.ok.map(x => x.name).join('、') || '无';
+    const need = r.need.map(x => x.name).join('、') || '无';
+    alert('✅ 已登录: ' + ok + '\n⬜ 需登录: ' + need);
+  } catch(e) { alert('检查失败: ' + e.message); }
+  refresh();
 }
 async function login(key) {
   await j('/api/login/start?key=' + key, {method:'POST'});
@@ -336,6 +347,17 @@ def api_login_check(key: str) -> dict:
 @app.post("/api/ask")
 def api_ask(req: AskReq) -> dict:
     return ask.ask_llm(req.platform, req.prompt, req.conversation_id)
+
+
+@app.post("/api/check_all")
+def api_check_all() -> dict:
+    """全自动健康检查：遍历所有平台检测登录态。"""
+    results = ask.check_all()
+    return {
+        "results": results,
+        "ok": [r for r in results if r.get("logged_in")],
+        "need": [r for r in results if not r.get("logged_in")],
+    }
 
 
 # ---------------------------------------------------------------------------

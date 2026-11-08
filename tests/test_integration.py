@@ -73,3 +73,12 @@ def test_rate_limit():
     _rate_limit()
     dt = time.monotonic() - t0
     assert 0.8 <= dt <= 2.0, f"间隔异常: {dt}"
+
+
+def test_check_all():
+    """全自动健康检查：遍历所有平台检测登录态（需浏览器）。"""
+    from tutor import ask
+
+    results = ask.check_all()
+    assert len(results) == 6
+    assert all({"key", "name", "logged_in"} <= set(r) for r in results)

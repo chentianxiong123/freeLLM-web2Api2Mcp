@@ -128,3 +128,24 @@ def mark_verified(platform: str) -> None:
     s = _state()
     s["verified"][platform] = True
     _save(s)
+
+
+def check_all() -> list[dict]:
+    """全自动健康检查：连 CDP/持久化浏览器，遍历所有平台检测登录态。
+
+    返回 [{key, name, url, logged_in, error?}]，供一键巡检/启动自动报告。
+    """
+    results = []
+    for key, p in load_providers().items():
+        try:
+            r = check_login(key)
+            results.append({
+                "key": key, "name": p.name, "url": p.url,
+                "logged_in": bool(r.get("logged_in")),
+            })
+        except Exception as exc:  # noqa: BLE001 - 单平台失败不中断巡检
+            results.append({
+                "key": key, "name": p.name, "url": p.url,
+                "logged_in": False, "error": str(exc)[:120],
+            })
+    return results
