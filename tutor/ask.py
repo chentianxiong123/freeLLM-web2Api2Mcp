@@ -33,7 +33,7 @@ def _state() -> dict:
     try:
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 - 无状态文件则新建
-        return {"verified": {}, "login": {}}
+        return {"verified": {}, "login": {}, "enabled": {}}
 
 
 def _save(s: dict) -> None:
@@ -41,7 +41,7 @@ def _save(s: dict) -> None:
 
 
 def list_llms() -> list[dict]:
-    """全部平台 + 登录态 + 验证态。"""
+    """全部平台 + 登录态 + 验证态 + 启停开关。"""
     s = _state()
     return [
         {
@@ -50,9 +50,19 @@ def list_llms() -> list[dict]:
             "url": p.url,
             "logged_in": bool(s["login"].get(k)),
             "verified": bool(s["verified"].get(k)),
+            "enabled": bool(s["enabled"].get(k, True)),  # 默认全开
         }
         for k, p in load_providers().items()
     ]
+
+
+def set_enabled(platform: str, on: bool) -> dict:
+    """供应商启停开关（不参与调度=关）。"""
+    s = _state()
+    s.setdefault("enabled", {})
+    s["enabled"][platform] = bool(on)
+    _save(s)
+    return {"platform": platform, "enabled": bool(on)}
 
 
 def _open_ready(page, provider) -> None:
@@ -68,9 +78,9 @@ def _open_ready(page, provider) -> None:
 
 
 def _enabled_map() -> dict[str, bool]:
-    """供应商启停：已验证+已登录的平台参与轮换。"""
+    """供应商启停：启停开关(默认开) 且 已登录 的平台参与轮换。"""
     s = _state()
-    return {k: bool(s["verified"].get(k) and s["login"].get(k)) for k in load_providers()}
+    return {k: bool(s["enabled"].get(k, True) and s["login"].get(k)) for k in load_providers()}
 
 
 def ask_llm(platform: str, prompt: str, conversation_id: str = "", consumer: str = "") -> dict:

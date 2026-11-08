@@ -48,6 +48,12 @@ class AskReq(BaseModel):
     platform: str
     prompt: str
     conversation_id: str = ""
+    consumer: str = ""
+
+
+class EnabledReq(BaseModel):
+    platform: str
+    enabled: bool
 
 
 class BrowserReq(BaseModel):
@@ -151,6 +157,11 @@ async function j(url, opt) {
   if (!r.ok) throw new Error((await r.text()).slice(0,200) || r.status);
   return r.json();
 }
+async function toggleEnabled(key, btn) {
+  const on = btn.textContent.includes('启用');
+  await j('/api/enabled', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({platform:key, enabled:on})});
+  refresh();
+}
 async function refresh() {
   const d = await j('/api/platforms');
   PLATS = d;
@@ -160,10 +171,12 @@ async function refresh() {
       <h3>${p.name} <span style="color:var(--mut);font-size:12px">${p.key}</span></h3>
       <div class="url">${p.url}</div>
       <div class="badges">
+        <span class="badge ${p.enabled ? 'ok' : 'no'}">${p.enabled ? '🟢 启用' : '🔴 停用'}</span>
         <span class="badge ${p.logged_in ? 'ok' : 'no'}">${p.logged_in ? '✅ 已登录' : '⬜ 未登录'}</span>
         <span class="badge ${p.verified ? 'ok' : 'warn'}">${p.verified ? '🔧 已验证' : '⚠️ 未验证'}</span>
       </div>
       <div class="ops">
+        <button onclick="toggleEnabled('${p.key}',this)">${p.enabled ? '⏸ 停用' : '▶ 启用'}</button>
         <button onclick="login('${p.key}')">🔑 登录</button>
         <button onclick="check('${p.key}',this)">🔍 检测</button>
       </div>
@@ -277,6 +290,12 @@ def index() -> str:
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
+
+
+@app.post("/api/enabled")
+def api_set_enabled(req: EnabledReq) -> dict:
+    """供应商启停开关。"""
+    return ask.set_enabled(req.platform, req.enabled)
 
 
 @app.get("/api/platforms")

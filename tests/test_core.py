@@ -8,6 +8,40 @@ import pytest
 
 from tutor.config import load_providers, get_browser, get_provider
 from tutor.driver import WebDriver
+
+
+def test_enabled_switch(tmp_path, monkeypatch):
+    """供应商启停：set_enabled 持久化 + list_llms 返回 enabled（默认开）。"""
+    from tutor import ask
+
+    monkeypatch.setattr(ask, "STATE_FILE", tmp_path / "state.json")
+    r = ask.set_enabled("deepseek", False)
+    assert r == {"platform": "deepseek", "enabled": False}
+    llms = {x["key"]: x for x in ask.list_llms()}
+    assert llms["deepseek"]["enabled"] is False
+    assert llms["doubao"]["enabled"] is True  # 默认全开
+    ask.set_enabled("deepseek", True)
+    llms = {x["key"]: x for x in ask.list_llms()}
+    assert llms["deepseek"]["enabled"] is True
+
+
+def test_enabled_map_and_login(tmp_path, monkeypatch):
+    """_enabled_map：启停开关(默认开) 且 已登录 才参与轮换。"""
+    from tutor import ask
+
+    monkeypatch.setattr(ask, "STATE_FILE", tmp_path / "state.json")
+    # 未登录 → 全 False（login 为空）
+    m = ask._enabled_map()
+    assert all(v is False for v in m.values())
+    # 登录 deepseek + 关 doubao
+    s = ask._state()
+    s["login"] = {"deepseek": True, "doubao": True}
+    s["enabled"] = {"doubao": False}
+    ask._save(s)
+    m = ask._enabled_map()
+    assert m["deepseek"] is True
+    assert m["doubao"] is False  # 启停关 → 不参与
+    assert m["kimi"] is False  # 未登录 → 不参与
 from tutor.lock import ProfileLock
 
 
