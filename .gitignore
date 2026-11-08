@@ -7,6 +7,7 @@ venv/
 # 运行时数据（profile/登录态/日志，勿提交）
 data/
 browsers/
+ref-project/
 
 # 日志
 *.log
