@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from tutor import ask
 from tutor import cookies
 from tutor import login as tutor_login
+from tutor import tasks
 from tutor.config import (
     get_browser,
     get_cdp_url,
@@ -54,6 +55,13 @@ class AskReq(BaseModel):
 class EnabledReq(BaseModel):
     platform: str
     enabled: bool
+
+
+class SubmitReq(BaseModel):
+    platform: str
+    prompt: str
+    conversation_id: str = ""
+    consumer: str = ""
 
 
 class BrowserReq(BaseModel):
@@ -264,12 +272,23 @@ async function ask(key, btn) {
   const ans = card.querySelector('.ans');
   const log = card.querySelector('.log');
   if (!prompt) { alert('先填测试提示词'); return; }
-  btn.disabled = true; btn.textContent = '提问中…'; ans.textContent = '请求中…'; ans.classList.remove('show');
+  btn.disabled = true; btn.textContent = '提问中…'; ans.textContent = '⏳ 提交…'; ans.classList.remove('show');
   try {
-    const r = await j('/api/ask', {method:'POST', headers:{'Content-Type':'application/json'},
+    // 并发靠轮询：提交返回 task_id，客户端轮询结果（服务端严格串行）
+    const r = await j('/api/ask/submit', {method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify({platform:key, prompt, conversation_id:cid})});
-    ans.textContent = r.answer || '(空)'; ans.classList.add('show');
-    log.textContent = '平台: ' + r.platform + ' · cid: ' + (r.conversation_id||'-');
+    const tid = r.task_id;
+    for (let i=0; i<120; i++) {
+      await new Promise(res=>setTimeout(res,2000));
+      const t = await j('/api/task/'+tid);
+      if (t.status==='done') {
+        ans.textContent = t.result?.answer || '(空)'; ans.classList.add('show');
+        log.textContent = '平台: ' + (t.result?.platform||'-') + ' · cid: ' + (t.result?.conversation_id||'-') + ' · 完成';
+        break;
+      }
+      if (t.status==='error') { ans.textContent = '❌ ' + t.error; ans.classList.add('show'); log.textContent='失败'; break; }
+      ans.textContent = '⏳ ' + t.status + '…';
+    }
   } catch(e) {
     ans.textContent = '❌ ' + e.message; ans.classList.add('show');
   }
@@ -366,6 +385,21 @@ def api_login_check(key: str) -> dict:
 @app.post("/api/ask")
 def api_ask(req: AskReq) -> dict:
     return ask.ask_llm(req.platform, req.prompt, req.conversation_id)
+
+
+@app.post("/api/ask/submit")
+def api_ask_submit(req: SubmitReq) -> dict:
+    """提交提问任务：立即返回 task_id，后台串行执行，客户端轮询。"""
+    return {"task_id": tasks.submit(req.platform, req.prompt, req.consumer)}
+
+
+@app.get("/api/task/{tid}")
+def api_task(tid: str) -> dict:
+    """轮询任务状态：{status: pending/running/done/error, result, error}。"""
+    t = tasks.get_task(tid)
+    if t is None:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+    return t
 
 
 @app.post("/api/check_all")
