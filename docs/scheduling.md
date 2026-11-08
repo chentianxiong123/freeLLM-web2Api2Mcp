@@ -83,11 +83,13 @@
 - **会话亲和**：同消费者上下文连贯（多轮对话），且不频繁新开会话（省资源/降风控）
 - **缓存**：重复提问不重复调 LLM（省额度），命中即回
 
-## 6. 待实现清单（按此调度策略）
+## 6. 实现状态（tutor/scheduler.py，CLIProxyAPI 蓝图）
 
-- [ ] 缓存路由（key=consumer+platform+hash(prompt)，TTL）
-- [ ] 会话亲和（consumer→conversation_id 映射 + TTL 回收）
-- [ ] 串行队列（全局 FIFO，严格一次一个）
-- [ ] 轮询任务（task_id → /task/{id} 轮询结果）
-- [ ] 供应商启停（enabled per platform）
-- [ ] 轮换（rotate，可选开关）
+- [x] 缓存路由（`CacheRoute`：key=consumer+platform+hash(prompt)，TTL）
+- [x] 会话亲和（`SessionAffinity`：consumer+platform → conversation_id，TTL 回收）
+- [x] 串行队列（`SerialQueue`：全局互斥，严格一次一个）
+- [x] 轮换（`WeightedRoundRobin`：平滑加权轮换，权重>0 才参与）
+- [x] 冷却（`Cooldown`：平台错误冷却，CLIProxyAPI 蓝图）
+- [x] 调度器（`Scheduler`：route 缓存/选平台/亲和 + commit 写回 + on_error 冷却）
+- [ ] 轮询任务（task_id → 轮询结果，客户端伪并发）
+- [ ] 供应商启停 UI（enabled_map 用 verified+login，UI 开关待加）

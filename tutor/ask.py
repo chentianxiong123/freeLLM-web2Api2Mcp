@@ -67,25 +67,55 @@ def _open_ready(page, provider) -> None:
             pass
 
 
-def ask_llm(platform: str, prompt: str, conversation_id: str = "") -> dict:
-    """向网页版大模型提问，返回 {"answer", "conversation_id", "platform"}。"""
+def _enabled_map() -> dict[str, bool]:
+    """供应商启停：已验证+已登录的平台参与轮换。"""
+    s = _state()
+    return {k: bool(s["verified"].get(k) and s["login"].get(k)) for k in load_providers()}
+
+
+def ask_llm(platform: str, prompt: str, conversation_id: str = "", consumer: str = "") -> dict:
+    """向网页版大模型提问（调度核心）。
+
+    调度（tutor.scheduler，CLIProxyAPI 蓝图）：
+    - 缓存路由：key=consumer+platform+hash(prompt) 命中直接返回（不调LLM）
+    - 平台选择：auto 时加权轮换（排除冷却/禁用）
+    - 会话亲和：consumer+platform → conversation_id 续聊
+    - 严格串行：一次一个（绝不并发）
+    - 冷却：失败平台冷却（降风控）
+    返回 {"answer", "conversation_id", "platform", "cached"}。
+    """
     if not prompt.strip():
         raise ValueError("prompt 不能为空")
-    _rate_limit()  # 风控：串行 + 随机间隔
-    provider = get_provider(platform)
-    bs = BrowserSession()
-    with bs.session() as ctx:
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        _open_ready(page, provider)
-        d = WebDriver(page, provider)
-        if conversation_id:
-            d.resume(conversation_id)
-        else:
-            d.new_chat()
-        d.send(prompt)
-        answer = d.wait_answer(prompt, timeout=90.0)
-        cid = conversation_id or d.current_cid()
-        return {"answer": answer, "conversation_id": cid, "platform": platform}
+    from tutor.scheduler import scheduler
+
+    d = scheduler.route(consumer, platform, prompt, enabled=_enabled_map(), weights={})
+    if d.cached:
+        return {"answer": d.answer, "conversation_id": d.conversation_id,
+                "platform": d.platform, "cached": True}
+    platform = d.platform
+    cid = d.conversation_id or conversation_id
+    with scheduler.queue:  # 严格串行（绝不并发）
+        try:
+            _rate_limit()  # 风控：随机间隔
+            provider = get_provider(platform)
+            bs = BrowserSession()
+            with bs.session() as ctx:
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                _open_ready(page, provider)
+                drv = WebDriver(page, provider)
+                if cid:
+                    drv.resume(cid)
+                else:
+                    drv.new_chat()
+                drv.send(prompt)
+                answer = drv.wait_answer(prompt, timeout=90.0)
+                result_cid = cid or drv.current_cid()
+            scheduler.commit(consumer, platform, prompt, result_cid, answer)
+            return {"answer": answer, "conversation_id": result_cid,
+                    "platform": platform, "cached": False}
+        except Exception as exc:  # noqa: BLE001 - 失败冷却该平台（降风控）
+            scheduler.on_error(platform)
+            raise
 
 
 def auto_ask(prompt: str) -> dict:
