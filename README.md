@@ -1,35 +1,68 @@
 # freeLLM-web2Api2Mcp
 
-> ⚠️ **本仓库为新代码线起点**（2026-11-08 起）。此前的代码已完成归档，历史与贡献全部保留。
->
-> **主线方向已转向：Web 搜索 MCP + 外援老师 MCP。**
+> **v3 主线：Web 搜索 MCP + 外援老师 MCP**（2026-11-08 起）。
 
-## 版本状态（旧版已过时）
+## 版本状态
 
 | 版本 | 形态 | 状态 |
 |---|---|---|
-| **v1** | DeepSeek/Qwen 网页端 → OpenAI Chat Completions API 代理（供 Claude Code） | 🪦 **已过时/归档** |
-| **v2** | 同一项目改造为 MCP Server（Streamable HTTP） | 🪦 **已过时/归档** |
-| **v3（主线）** | **Web 搜索 MCP + 外援老师 MCP** | 🟢 **当前主线** |
+| **v1** | DeepSeek/Qwen 网页端 → OpenAI API 代理 | 🪦 已归档（见 LEGACY.md） |
+| **v2** | 同一项目改造为 MCP Server | 🪦 已归档 |
+| **v3（当前）** | **原创「外援老师」核心 + 自建 Web 后台 + MCP 工具** | 🟢 当前主线 |
 
-> ⚠️ **v1 / v2 均已过时**，请勿再基于旧代码开发。
-> v1 的详细工作与架构（含复刻中间层对接 React Agent 的每一环节）见 **[LEGACY.md](./LEGACY.md)** —— 那是大量心血，务必保留、不要丢。
+v1/v2 历史与贡献全部保留（63 commits，2 位贡献者），详见 [LEGACY.md](./LEGACY.md)。
 
-## 旧代码去哪了？
+## v3 是什么
 
-| 位置 | 内容 |
-|---|---|
-| `archive/legacy-2026-08-mcp` | v2（MCP 版，2026-08-23） |
-| `archive/go-rewrite` | 早期废弃分支（2026-06-28） |
-| tag `legacy/0.4.0-mcp` | v2 固化的保险 tag |
-| tag `python-legacy` | 早期 Python 版归档 tag |
+把**国内网页版大模型**（豆包 / DeepSeek / Kimi / 通义千问 / 智谱清言 / 腾讯元宝）包装成
+**MCP 工具**，供 coding agent 当「外援老师」调用——拿评审、教学、第二意见。
 
-**恢复旧代码**：`git checkout archive/legacy-2026-08-mcp`
-**查看完整历史**：`git log --all --oneline`（63 commits，2 位贡献者：chentianxiong123 / dllm）
+**联网搜索 = 提示词工程**：让模型自己搜，不接搜索 API、不抓正文。
 
-## 新主线（v3）：Web 搜索 MCP + 外援老师 MCP
+## 技术栈
 
-- **Web 搜索 MCP**：为 AI 提供网页/科研/技术搜索能力（见现有 `searxng-mcp` 雏形，将升级为多 provider）
-- **外援老师 MCP**：把外部 LLM（老师/专家）包装成 MCP 工具，供 coding agent 获取评审、教学、第二意见
+Python 3.10+ · Playwright（**复用本机 Chrome/Edge，零下载**）· FastAPI · mcp SDK。
 
-（待填写：新项目说明、架构、使用方式）
+> 核心层为**原创实现**（`tutor/`，MIT 许可），平台选择器配置为功能性事实数据
+> （`tutor_platforms_data.json`，实测回填，来源见 LICENSE 说明）。
+
+## 目录
+
+```
+tutor/                 原创核心层
+├── config.py          平台配置 + 全局设置（浏览器/无头）
+├── browser.py         系统浏览器复用 + 反指纹 + profile 会话锁
+├── driver.py          Playwright 选择器驱动（提问/等回答/续聊/登录检测）
+├── ask.py             调用编排（单平台 / auto / 登录检测 / 状态持久化）
+├── mcp.py             MCP 工具（ask_web_llm / list_web_llms）
+├── login.py           登录窗口启动
+├── login_worker.py    登录工作进程（弹系统 Chrome）
+└── lock.py            profile 会话锁
+ui_server.py           自建 Web 后台（FastAPI）
+server.py              MCP server 入口（stdio / HTTP）
+tutor_platforms_data.json  平台配置数据（功能性事实）
+```
+
+## 部署
+
+```bash
+python3 -m venv venv
+./venv/bin/pip install -r requirements.txt
+# 默认浏览器=系统 Chrome（复用本机，不下载）；改 data/settings.json 可切 msedge
+./venv/bin/python ui_server.py --port 8787   # Web 后台 http://127.0.0.1:8787
+./venv/bin/python server.py --http --port 8788   # MCP HTTP（Streamable HTTP）
+./venv/bin/python server.py                      # MCP stdio
+```
+
+## 使用流程
+
+1. 打开 Web 后台 `http://127.0.0.1:8787`
+2. 对要用的平台点「🔑 登录」→ 弹系统 Chrome → 人工登录 → 关窗
+3. 点「🔍 检测」确认已登录；「▶ 提问」测试（提示词让它搜东西）
+4. MCP 接入：`ask_web_llm(platform="deepseek", prompt="...")` 或 `platform="auto"`
+
+## 下一步（规划）
+
+- [ ] 聚合层：并发调多平台 → 合并去重 → 按平台分组（只出摘要）
+- [ ] Web 搜索开关：提示词工程（让模型自己联网搜）
+- [ ] 生图（豆包 supports_image）
