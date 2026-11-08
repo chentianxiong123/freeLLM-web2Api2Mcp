@@ -136,3 +136,29 @@ class BrowserSession:
             yield self._context
         finally:
             self._stop()
+
+
+def minimize_window(page) -> None:
+    """最小化浏览器窗口（CDP 注入合成事件，不抢焦点）——提问时无感。
+
+    Playwright 鼠标/键盘是 CDP 合成事件（注入页面，不经过系统鼠标/键盘），
+    不需要窗口在前台；窗口最小化后仍能注入——做其他事不被切出来。
+    """
+    try:
+        cdp = page.context.new_cdp_session(page)
+        win = cdp.send("Browser.getWindowForTarget")
+        cdp.send("Browser.setWindowBounds", {
+            "windowId": win["windowId"], "bounds": {"windowState": "minimized"}})
+    except Exception:  # noqa: BLE001 - 非 CDP/失败忽略（不影响提问）
+        pass
+
+
+def restore_window(page) -> None:
+    """恢复浏览器窗口（提问完）。"""
+    try:
+        cdp = page.context.new_cdp_session(page)
+        win = cdp.send("Browser.getWindowForTarget")
+        cdp.send("Browser.setWindowBounds", {
+            "windowId": win["windowId"], "bounds": {"windowState": "normal"}})
+    except Exception:  # noqa: BLE001 - 失败忽略
+        pass

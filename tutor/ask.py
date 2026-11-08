@@ -7,7 +7,7 @@ import random
 import threading
 import time
 
-from tutor.browser import BrowserSession
+from tutor.browser import BrowserSession, minimize_window, restore_window
 from tutor.config import DATA_DIR, get_interval, get_provider, load_providers
 from tutor.driver import WebDriver
 
@@ -112,14 +112,18 @@ def ask_llm(platform: str, prompt: str, conversation_id: str = "", consumer: str
             with bs.session() as ctx:
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
                 _open_ready(page, provider)
-                drv = WebDriver(page, provider)
-                if cid:
-                    drv.resume(cid)
-                else:
-                    drv.new_chat()
-                drv.send(prompt)
-                answer = drv.wait_answer(prompt, timeout=90.0)
-                result_cid = cid or drv.current_cid()
+                minimize_window(page)  # 提问时最小化窗口（无感，不抢焦点）
+                try:
+                    drv = WebDriver(page, provider)
+                    if cid:
+                        drv.resume(cid)
+                    else:
+                        drv.new_chat()
+                    drv.send(prompt)
+                    answer = drv.wait_answer(prompt, timeout=90.0)
+                    result_cid = cid or drv.current_cid()
+                finally:
+                    restore_window(page)  # 答完恢复窗口
             scheduler.commit(consumer, platform, prompt, result_cid, answer)
             return {"answer": answer, "conversation_id": result_cid,
                     "platform": platform, "cached": False}
