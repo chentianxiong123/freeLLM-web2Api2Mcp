@@ -94,3 +94,34 @@ def test_profile_lock():
     l2.acquire()  # l1 释放后可获取
     l2.release()
     os.unlink(path)
+
+
+def test_mode_default():
+    from tutor.config import set_cdp_url, get_mode, set_mode
+
+    set_mode("persistent")
+    set_cdp_url("")
+    assert get_mode() == "persistent"
+
+
+def test_mode_invalid():
+    from tutor.config import set_mode
+
+    with pytest.raises(ValueError):
+        set_mode("bogus")
+
+
+def test_interval_roundtrip():
+    from tutor.config import get_interval, set_interval
+
+    set_interval(3.0, 7.0)
+    lo, hi = get_interval()
+    assert (lo, hi) == (3.0, 7.0)
+
+
+def test_interval_swapped():
+    from tutor.config import get_interval, set_interval
+
+    set_interval(9.0, 2.0)  # hi<lo 自动交换
+    lo, hi = get_interval()
+    assert lo <= hi

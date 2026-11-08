@@ -12,7 +12,7 @@ from typing import Iterator
 
 from playwright.sync_api import BrowserContext, sync_playwright
 
-from tutor.config import get_browser, get_headless, profile_dir
+from tutor.config import get_browser, get_cdp_url, get_headless, get_mode, profile_dir
 from tutor.lock import ProfileLock
 
 # 反自动化指纹（通用技巧）：掩盖 webdriver / 伪装 chrome / plugins / languages
@@ -50,21 +50,37 @@ class BrowserSession:
     def __init__(self) -> None:
         self._pw = None
         self._context: BrowserContext | None = None
+        self._browser = None
+        self._cdp = False
         self._lock: ProfileLock | None = None
 
     # -- 内部 --------------------------------------------------------
 
     def _launch(self, headless: bool) -> None:
         self._pw = sync_playwright().start()
-        self._context = self._pw.chromium.launch_persistent_context(
-            user_data_dir=profile_dir(),
-            channel=channel(),
-            headless=headless,
-            handle_sigint=False,
-            handle_sigterm=False,
-            args=BROWSER_ARGS,
-        )
-        self._context.add_init_script(STEALTH)
+        if get_mode() == "cdp" and get_cdp_url():
+            # CDP 模式：连接已打开的真浏览器，复用其登录态（指纹/账号真实，风控最小）
+            self._cdp = True
+            self._browser = self._pw.chromium.connect_over_cdp(get_cdp_url())
+            # 复用用户默认 context（含登录态）；无则新建
+            self._context = (
+                self._browser.contexts[0]
+                if self._browser.contexts
+                else self._browser.new_context()
+            )
+            self._context.add_init_script(STEALTH)
+        else:
+            # persistent 模式：自带持久化 profile（登录一次，之后复用）
+            self._cdp = False
+            self._context = self._pw.chromium.launch_persistent_context(
+                user_data_dir=profile_dir(),
+                channel=channel(),
+                headless=headless,
+                handle_sigint=False,
+                handle_sigterm=False,
+                args=BROWSER_ARGS,
+            )
+            self._context.add_init_script(STEALTH)
 
     def _alive(self) -> bool:
         try:
@@ -73,16 +89,25 @@ class BrowserSession:
             return False
 
     def _stop(self) -> None:
-        try:
-            if self._context is not None:
-                self._context.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            if self._pw is not None:
-                self._pw.stop()
-        except Exception:  # noqa: BLE001
-            pass
+        if self._cdp:
+            # CDP：只断开连接，不关用户浏览器
+            try:
+                if self._pw is not None:
+                    self._pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self._browser = None
+        else:
+            try:
+                if self._context is not None:
+                    self._context.close()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                if self._pw is not None:
+                    self._pw.stop()
+            except Exception:  # noqa: BLE001
+                pass
         self._context = None
         self._pw = None
         if self._lock is not None:
@@ -93,8 +118,16 @@ class BrowserSession:
 
     @contextmanager
     def session(self, headless: bool | None = None) -> Iterator[BrowserContext]:
-        """进入：拿 profile 锁 + 确保浏览器启动；退出：关闭浏览器并释放锁。"""
-        self._lock = ProfileLock(profile_dir() + ".lock", timeout=60.0)
+        """进入：拿锁 + 确保浏览器启动；退出：关闭并释放锁。
+
+        persistent 模式用 profile 锁（与登录窗口互斥）；
+        CDP 模式用全局锁（防多进程并发连同一浏览器）。
+        """
+        if get_mode() == "cdp" and get_cdp_url():
+            lock_path = "/tmp/tutor-cdp.lock"
+        else:
+            lock_path = profile_dir() + ".lock"
+        self._lock = ProfileLock(lock_path, timeout=60.0)
         self._lock.acquire()
         try:
             if not self._alive():

@@ -3,13 +3,30 @@
 from __future__ import annotations
 
 import json
+import random
+import threading
 import time
 
 from tutor.browser import BrowserSession
-from tutor.config import DATA_DIR, get_provider, load_providers
+from tutor.config import DATA_DIR, get_interval, get_provider, load_providers
 from tutor.driver import WebDriver
 
 STATE_FILE = DATA_DIR / "state.json"
+
+# 风控：提问串行化 + 随机间隔（同一时间只发一个问题）
+_last_call = [0.0]
+_rate_lock = threading.Lock()
+
+
+def _rate_limit() -> None:
+    """提问前随机等待，保证串行 + 间隔 uniform(min_interval, max_interval)。"""
+    lo, hi = get_interval()
+    with _rate_lock:
+        now = time.monotonic()
+        wait = random.uniform(lo, hi) - (now - _last_call[0])
+        if wait > 0:
+            time.sleep(wait)
+        _last_call[0] = time.monotonic()
 
 
 def _state() -> dict:
@@ -54,6 +71,7 @@ def ask_llm(platform: str, prompt: str, conversation_id: str = "") -> dict:
     """向网页版大模型提问，返回 {"answer", "conversation_id", "platform"}。"""
     if not prompt.strip():
         raise ValueError("prompt 不能为空")
+    _rate_limit()  # 风控：串行 + 随机间隔
     provider = get_provider(platform)
     bs = BrowserSession()
     with bs.session() as ctx:

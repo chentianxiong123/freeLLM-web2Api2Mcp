@@ -24,8 +24,18 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from tutor import ask
+from tutor import cookies
 from tutor import login as tutor_login
-from tutor.config import get_browser, get_provider, set_browser
+from tutor.config import (
+    get_browser,
+    get_cdp_url,
+    get_interval,
+    get_mode,
+    set_browser,
+    set_cdp_url,
+    set_interval,
+    set_mode,
+)
 
 app = FastAPI(title="网页LLM 外援老师后台")
 
@@ -42,6 +52,13 @@ class AskReq(BaseModel):
 
 class BrowserReq(BaseModel):
     value: str
+
+
+class SettingsReq(BaseModel):
+    mode: str = ""
+    cdp: str = ""
+    min_interval: float | None = None
+    max_interval: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +122,23 @@ HTML = """<!doctype html>
     <button onclick="setBrowser()">切换</button>
     <span id="browserInfo" style="font-size:13px;color:var(--mut)"></span>
   </div>
+  <div class="card" style="margin-bottom:18px">
+    <h3 style="font-size:14px;margin:0 0 10px">⚙️ 运行模式（风控）</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <select id="mode">
+        <option value="persistent">persistent（自带profile，登录一次复用）</option>
+        <option value="cdp">cdp（连真浏览器，风控最小）</option>
+      </select>
+      <input id="cdp" placeholder="CDP地址 http://127.0.0.1:9222" style="width:230px;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:13px">
+      <input id="minInt" type="number" step="0.5" style="width:68px;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px;font-size:13px" title="最小间隔秒">
+      <span style="color:var(--mut);font-size:12px">~</span>
+      <input id="maxInt" type="number" step="0.5" style="width:68px;background:var(--bg);color:var(--tx);border:1px solid var(--line);border-radius:8px;padding:7px;font-size:13px" title="最大间隔秒">
+      <span style="color:var(--mut);font-size:12px">秒(提问间隔)</span>
+      <button onclick="saveSettings()">保存</button>
+      <button onclick="exportState()">导出登录态</button>
+      <button onclick="importState()">导入登录态</button>
+    </div>
+  </div>
   <div class="grid" id="grid"><div class="card">加载中…</div></div>
 </main>
 <footer>外援老师 MCP 底座 · 自建 UI · 登录后用「检测」确认 · 测试提问验证可用</footer>
@@ -143,6 +177,7 @@ async function refresh() {
       <div class="log"></div>
     </div>`).join('');
   await loadBrowser();
+  await loadSettings();
 }
 async function loadBrowser() {
   const b = await j('/api/browser');
@@ -155,6 +190,35 @@ async function setBrowser() {
   await j('/api/browser', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({value:v})});
   await loadBrowser();
   alert('已切换浏览器为 ' + v + '（复用本机，不下载）');
+}
+async function loadSettings() {
+  const s = await j('/api/settings');
+  document.getElementById('mode').value = s.mode;
+  document.getElementById('cdp').value = s.cdp || '';
+  document.getElementById('minInt').value = s.min_interval;
+  document.getElementById('maxInt').value = s.max_interval;
+}
+async function saveSettings() {
+  const body = {
+    mode: document.getElementById('mode').value,
+    cdp: document.getElementById('cdp').value.trim(),
+    min_interval: parseFloat(document.getElementById('minInt').value),
+    max_interval: parseFloat(document.getElementById('maxInt').value)
+  };
+  const s = await j('/api/settings', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  alert('已保存：模式=' + s.mode + ' 间隔=' + s.min_interval + '~' + s.max_interval + 's');
+}
+async function exportState() {
+  try {
+    const r = await j('/api/state/export', {method:'POST'});
+    alert('登录态已导出: ' + r.path);
+  } catch(e) { alert('导出失败: ' + e.message); }
+}
+async function importState() {
+  try {
+    const r = await j('/api/state/import', {method:'POST'});
+    alert('已注入 ' + r.count + ' 个 cookie');
+  } catch(e) { alert('导入失败: ' + e.message); }
 }
 async function login(key) {
   await j('/api/login/start?key=' + key, {method:'POST'});
@@ -221,6 +285,41 @@ def api_browser() -> dict:
 def api_set_browser(req: BrowserReq) -> dict:
     set_browser(req.value)
     return {"current": get_browser(), "available": AVAILABLE_BROWSERS}
+
+
+@app.get("/api/settings")
+def api_settings() -> dict:
+    lo, hi = get_interval()
+    return {
+        "mode": get_mode(),
+        "browser": get_browser(),
+        "cdp": get_cdp_url(),
+        "min_interval": lo,
+        "max_interval": hi,
+    }
+
+
+@app.post("/api/settings")
+def api_set_settings(req: SettingsReq) -> dict:
+    if req.mode:
+        set_mode(req.mode)
+    if req.cdp != "":
+        set_cdp_url(req.cdp)
+    if req.min_interval is not None and req.max_interval is not None:
+        set_interval(req.min_interval, req.max_interval)
+    return api_settings()
+
+
+@app.post("/api/state/export")
+def api_export_state() -> dict:
+    p = cookies.export_state()
+    return {"ok": True, "path": p}
+
+
+@app.post("/api/state/import")
+def api_import_state() -> dict:
+    n = cookies.import_state(str(cookies.DEFAULT_EXPORT))
+    return {"ok": True, "count": n}
 
 
 @app.post("/api/login/start")

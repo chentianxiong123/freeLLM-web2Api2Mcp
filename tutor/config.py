@@ -87,8 +87,16 @@ def get_provider(key: str) -> Provider:
 # ---------------------------------------------------------------------------
 
 SETTINGS_FILE: Path = DATA_DIR / "settings.json"
-DEFAULT_SETTINGS = {"browser": "chrome", "headless": False}
+DEFAULT_SETTINGS = {
+    "browser": "chrome",
+    "headless": False,
+    "mode": "persistent",  # persistent=自带profile / cdp=连真浏览器
+    "connect_cdp": "",      # CDP 地址，mode=cdp 时用，如 http://127.0.0.1:9222
+    "min_interval": 5.0,     # 提问最小间隔（秒，风控：串行+随机延迟）
+    "max_interval": 15.0,    # 提问最大间隔（秒，随机上限）
+}
 ALLOWED_BROWSERS = ("chrome", "msedge", "chromium")
+ALLOWED_MODES = ("persistent", "cdp")
 
 
 def _settings() -> dict:
@@ -121,6 +129,48 @@ def get_headless() -> bool:
 def set_headless(flag: bool) -> None:
     s = _settings()
     s["headless"] = bool(flag)
+    _save_settings(s)
+
+
+def get_cdp_url() -> str:
+    """CDP 连接地址；非空 = 连接已打开的真浏览器（复用其登录态）。"""
+    return str(_settings().get("connect_cdp", ""))
+
+
+def set_cdp_url(url: str) -> None:
+    s = _settings()
+    s["connect_cdp"] = url.strip()
+    _save_settings(s)
+
+
+def get_mode() -> str:
+    """运行模式：persistent=自带profile / cdp=连真浏览器。"""
+    m = str(_settings().get("mode", "persistent"))
+    return m if m in ALLOWED_MODES else "persistent"
+
+
+def set_mode(value: str) -> None:
+    if value not in ALLOWED_MODES:
+        raise ValueError(f"不支持的模式: {value}（可选: {ALLOWED_MODES}）")
+    s = _settings()
+    s["mode"] = value
+    _save_settings(s)
+
+
+def get_interval() -> tuple[float, float]:
+    """提问间隔（秒）：(min, max)，每次提问前随机等待，风控降频。"""
+    s = _settings()
+    lo = float(s.get("min_interval", 5.0))
+    hi = float(s.get("max_interval", 15.0))
+    if hi < lo:
+        lo, hi = hi, lo
+    return lo, hi
+
+
+def set_interval(min_sec: float, max_sec: float) -> None:
+    s = _settings()
+    s["min_interval"] = float(min_sec)
+    s["max_interval"] = float(max_sec)
     _save_settings(s)
 
 
